@@ -53,12 +53,12 @@ Vol (decimal or surface JSON): 0.07
 Maturity T (years): 0.5
 Risk-free rate r [0.0]: 0.04
 Carry/dividend yield q [0.0]: 0.03
-Barrier type (up-and-out/up-and-in/down-and-out/down-and-in) [up-and-out]:
-Monitoring (continuous/discrete) [continuous]:
+Barrier type (uo/ui/do/di) [uo]:
+Monitoring (c/d) [c]:
 Barrier level H: 1.20
 Rebate [0.0]:
 Strike K (blank = spot):
-Option type (call/put) [call]:
+Option type (c/p) [c]:
 contract  : up-and-out call, continuous, K=1.1, H=1.2, rebate=0
 market    : S0=1.1, r=0.04, q=0.03, T=0.5
 vol       : 0.070000 (constant)
@@ -90,7 +90,7 @@ Monte Carlo controls are flags only (they are never prompted):
 
 ```bash
 crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
-  -H 1.20 --type up-and-out --paths 20000 --steps 50 --seed 1
+  -H 1.20 --type uo --paths 20000 --steps 50 --seed 1
 ```
 
 | Option | Meaning |
@@ -99,7 +99,7 @@ crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
 | `-v` | volatility: a decimal constant **or** a path to a surface JSON (exactly one) |
 | `-T` | time to maturity in years |
 | `-r`, `-q` | risk-free rate, dividend/carry yield (default 0) |
-| `-H`, `--type`, `--monitor`, `--rebate` | barrier level, one of the four types, `continuous`/`discrete`, cash rebate |
+| `-H`, `--type`, `--monitor`, `--rebate` | barrier level; type `uo`/`ui`/`do`/`di`; monitor `c`/`d`; cash rebate |
 | `-K` | strike (default: spot) |
 | `--call` / `--put` | option type (default call) |
 | `--paths`, `--steps`, `--seed`, `--no-control-variate` | Monte Carlo controls |
@@ -145,7 +145,7 @@ so you still get a constant-vol reference:
 
 ```bash
 crossbar price -S 1.10 -v examples/vol_surface.json -T 0.5 -r 0.04 -q 0.03 \
-  -H 1.20 --type up-and-out
+  -H 1.20 --type uo
 ```
 
 ```
@@ -196,7 +196,7 @@ and exit with code `2`.
 
 ```bash
 crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
-  -H 1.20 --type up-and-out --paths 20000 --steps 50 --json
+  -H 1.20 --type uo --paths 20000 --steps 50 --json
 ```
 
 ```json

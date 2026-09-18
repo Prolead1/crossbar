@@ -36,7 +36,14 @@ from .params import BarrierSpec, BSParams, validate_inputs
 from .vol_surface import VolSurface
 
 BARRIER_TYPES = ("up-and-out", "up-and-in", "down-and-out", "down-and-in")
+BARRIER_CODES = {
+    "uo": "up-and-out",
+    "ui": "up-and-in",
+    "do": "down-and-out",
+    "di": "down-and-in",
+}
 MONITORS = ("continuous", "discrete")
+MONITOR_CODES = {"c": "continuous", "d": "discrete"}
 
 #: Spot bump for the finite-difference deltas of the analytic and Monte
 #: Carlo rows (the PDE row reads its delta off the solved surface).
@@ -149,15 +156,15 @@ def _add_barrier_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--type",
         dest="barrier_type",
-        choices=BARRIER_TYPES,
+        choices=(*BARRIER_CODES, *BARRIER_TYPES),
         default=None,
-        help="barrier type (default up-and-out)",
+        help="barrier type: uo/ui/do/di (default uo)",
     )
     p.add_argument(
         "--monitor",
-        choices=MONITORS,
+        choices=(*MONITOR_CODES, *MONITORS),
         default=None,
-        help="barrier monitoring convention (default continuous)",
+        help="monitoring: c/d (default c)",
     )
     p.add_argument("--rebate", type=float, default=None, help="cash rebate (default 0)")
     g = p.add_mutually_exclusive_group()
@@ -196,6 +203,20 @@ def _value(a, attr, label, default, cast, choices, interactive, validate=None):
     return default
 
 
+def _resolve_choice(a, attr, label, default_code, codes, interactive):
+    """Resolve a short-code choice, returning the full value.
+
+    Flags may use either the short code (``uo``) or the full name
+    (``up-and-out``); prompts offer the short codes.
+    """
+    current = getattr(a, attr)
+    if current is not None:
+        return codes.get(current, current)
+    if interactive:
+        return codes[_prompt(label, default_code, str, tuple(codes))]
+    return codes[default_code]
+
+
 def _resolve_vol(raw: str):
     """Split the vol input into ``(constant_sigma, surface_path)``.
 
@@ -232,11 +253,11 @@ def _resolve(a: argparse.Namespace, interactive: bool) -> None:
     a.rate = _value(a, "rate", "Risk-free rate r", 0.0, float, None, interactive)
     a.div = _value(a, "div", "Carry/dividend yield q", 0.0, float, None, interactive)
 
-    a.barrier_type = _value(
-        a, "barrier_type", "Barrier type", "up-and-out", str, BARRIER_TYPES, interactive
+    a.barrier_type = _resolve_choice(
+        a, "barrier_type", "Barrier type", "uo", BARRIER_CODES, interactive
     )
-    a.monitor = _value(
-        a, "monitor", "Monitoring", "continuous", str, MONITORS, interactive
+    a.monitor = _resolve_choice(
+        a, "monitor", "Monitoring", "c", MONITOR_CODES, interactive
     )
     a.barrier = _value(
         a, "barrier", "Barrier level H", None, float, None, interactive
@@ -261,9 +282,7 @@ def _resolve(a: argparse.Namespace, interactive: bool) -> None:
 
     if a.is_call is None:
         if interactive:
-            a.is_call = (
-                _prompt("Option type", "call", str, ("call", "put")) == "call"
-            )
+            a.is_call = _prompt("Option type", "c", str, ("c", "p")) == "c"
         else:
             a.is_call = True
 

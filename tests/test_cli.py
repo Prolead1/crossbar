@@ -64,12 +64,12 @@ BARRIER_PROMPTS = {
     "Maturity": "0.5",
     "Risk-free": "0.04",
     "Carry": "0.03",
-    "Barrier type": "up-and-out",
-    "Monitoring": "continuous",
+    "Barrier type": "uo",
+    "Monitoring": "c",
     "Barrier level": "1.20",
     "Rebate": "",
     "Strike": "1.15",
-    "Option type": "call",
+    "Option type": "c",
 }
 
 
@@ -245,6 +245,14 @@ def test_price_with_surface_json(quotes_file, capsys):
     assert pde["price"] is not None
     assert pde["delta"] is not None
     assert pde["price"] != analytic["price"]
+
+
+def test_price_accepts_short_codes(capsys):
+    flags = ["price", *_fx(), "-H", "1.20", "--type", "ui", "--monitor", "d", *MC, "--json"]
+    assert main(flags, interactive=False) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["contract"]["type"] == "up-and-in"
+    assert data["contract"]["monitor"] == "discrete"
 
 
 def test_price_discrete_still_shows_analytic(capsys):
