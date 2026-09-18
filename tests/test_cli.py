@@ -224,28 +224,29 @@ def test_price_with_surface_keeps_flat_vol_analytic(quotes_file, capsys):
     assert main(flags, interactive=False) == 0
     out = capsys.readouterr().out
     assert quotes_file in out
-    assert "control_variate" not in out
+    assert "control_variate" in out  # MC now prices the surface term structure
     assert "vol       : 0.076000 (ATM from surface)" in out
     assert "benchmark : vanilla = 0.025974" in out
     assert "0.014261" in out  # flat ATM closed form is still reported
     assert "delta" in out
-    assert "note: analytic" not in out
-    assert "note: mc skipped" in out
+    assert "note: mc skipped" not in out
 
 
 def test_price_with_surface_json(quotes_file, capsys):
     flags = ["price", *_fx(quotes_file), *UP, "--json"]
     assert main(flags, interactive=False) == 0
     data = json.loads(capsys.readouterr().out)
-    assert "mc_options" not in data
+    assert "mc_options" in data
     assert data["vol_source"] == "ATM from surface"
     assert data["market"]["vol"] == pytest.approx(0.076)
     assert data["vanilla_benchmark"] == pytest.approx(0.0259738, abs=1e-6)
     analytic, mc, pde = data["prices"]
     assert analytic["price"] == pytest.approx(0.0142608, abs=1e-6)
     assert analytic["delta"] is not None
-    assert mc["price"] is None and mc["delta"] is None and "surface" in mc["note"]
-    assert mc["gamma"] is None
+    # Monte Carlo prices the surface term structure at the barrier level
+    assert mc["price"] is not None
+    assert mc["delta"] is not None and mc["gamma"] is not None
+    assert "note" not in mc
     assert pde["price"] is not None
     assert pde["delta"] is not None
     assert pde["price"] != analytic["price"]
@@ -367,7 +368,7 @@ def test_interactive_accepts_full_choice_names(monkeypatch, capsys):
     assert data["contract"]["call"] is False
 
 
-def test_interactive_barrier_with_surface_skips_mc(monkeypatch, quotes_file, capsys):
+def test_interactive_barrier_with_surface_prices_mc(monkeypatch, quotes_file, capsys):
     prompts = dict(BARRIER_PROMPTS)
     prompts["Vol (decimal or surface JSON)"] = quotes_file
     prompts["Strike"] = ""  # blank -> spot
@@ -375,8 +376,8 @@ def test_interactive_barrier_with_surface_skips_mc(monkeypatch, quotes_file, cap
     assert main(["price"], interactive=True) == 0
     out = capsys.readouterr().out
     assert quotes_file in out
-    assert "control_variate" not in out
-    assert "note: mc skipped" in out
+    assert "control_variate" in out
+    assert "note: mc skipped" not in out
 
 
 def test_interactive_with_all_flags_never_prompts(monkeypatch, quotes_file, capsys):

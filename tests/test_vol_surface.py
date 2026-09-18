@@ -11,18 +11,26 @@ import pytest
 from crossbar import (
     BarrierSpec,
     BSParams,
+    LocalVolSurface,
     VolSmile,
     VolSurface,
+    barrier_hits,
     build_grid,
     build_sigma_grid,
+    check_arbitrage,
     gen_normals,
+    local_vol_grid,
+    local_volatility,
     mid_vol,
     monte_carlo_paths,
     pde_knock_out,
     pde_surface,
     plot_vol_surface,
+    price_barrier_mc,
     price_barrier_pde,
+    price_vanilla,
     sigma_for_strike,
+    stepwise_sigmas_for_strike,
     stepwise_sigmas_from_surface,
     strike_from_delta,
     tenor_to_years,
@@ -160,12 +168,14 @@ def test_vol_surface_from_quotes_is_sorted_and_clamped():
     assert SURFACE.interp_sigma(last * 2, 0.10) == pytest.approx(
         SURFACE.smiles[last].sigma(0.10)
     )
-    # halfway in maturity between the 3M and 6M pillars
+    # halfway in maturity between the 3M and 6M pillars: linear in total
+    # variance, then converted back to vol
     t0, t1 = 0.25, 0.5
-    expected = 0.5 * (
-        SURFACE.smiles[t0].sigma(0.10) + SURFACE.smiles[t1].sigma(0.10)
-    )
-    assert SURFACE.interp_sigma(0.5 * (t0 + t1), 0.10) == pytest.approx(expected)
+    tm = 0.5 * (t0 + t1)
+    w0 = SURFACE.smiles[t0].sigma(0.10) ** 2 * t0
+    w1 = SURFACE.smiles[t1].sigma(0.10) ** 2 * t1
+    assert SURFACE.interp_sigma(tm, 0.10) == pytest.approx(np.sqrt(0.5 * (w0 + w1) / tm))
+    assert SURFACE.total_variance(tm, 0.10) == pytest.approx(0.5 * (w0 + w1))
 
 
 def test_vol_surface_accepts_mapping_and_iterable():
@@ -315,6 +325,11 @@ def test_sigma_for_strike_array_and_maturity_clamping():
 # --------------------------------------------------------------------------
 
 
+def test_sigma_for_strike_at_zero_maturity_uses_short_end_vol():
+    val = float(sigma_for_strike(SURFACE, FX, 1.10, 0.0))
+    assert val == pytest.approx(0.06, abs=1e-3)
+
+
 def test_stepwise_sigmas_reproduce_implied_variance():
     T, n_steps = 0.75, 30
     steps = stepwise_sigmas_from_surface(SURFACE, T, n_steps, delta=0.25)
@@ -337,9 +352,114 @@ def test_stepwise_sigmas_rejects_bad_inputs():
         stepwise_sigmas_from_surface(SURFACE, 0.5, 0)
 
 
+def test_stepwise_sigmas_for_strike_reproduces_implied_variance():
+    T, n_steps, K = 0.5, 25, 1.10
+    steps = stepwise_sigmas_for_strike(SURFACE, FX, K, T, n_steps)
+    t = np.linspace(0.0, T, n_steps + 1)
+    variance = np.concatenate([[0.0], np.cumsum(steps**2) * (T / n_steps)])
+    implied = np.array(
+        [sigma_for_strike(SURFACE, FX, K, ti) ** 2 * ti for ti in t[1:]]
+    )
+    np.testing.assert_allclose(variance[1:], implied, atol=1e-14)
+
+
+def test_stepwise_sigmas_for_strike_flat_surface_is_constant():
+    steps = stepwise_sigmas_for_strike(flat_surface(0.2, 1.0), FX, 1.10, 1.0, 8)
+    np.testing.assert_allclose(steps, 0.2)
+
+
+def test_stepwise_sigmas_for_strike_rejects_bad_inputs():
+    with pytest.raises(ValueError):
+        stepwise_sigmas_for_strike(SURFACE, FX, 1.10, 0.0, 10)
+    with pytest.raises(ValueError):
+        stepwise_sigmas_for_strike(SURFACE, FX, 1.10, 0.5, 0)
+
+
 # --------------------------------------------------------------------------
-# sigma(S, t) grid
+# Dupire local volatility
 # --------------------------------------------------------------------------
+
+
+def test_local_vol_flat_surface_is_constant():
+    S = np.linspace(0.7, 1.6, 31)
+    t = np.linspace(1e-6, 1.0, 13)
+    grid = local_vol_grid(flat_surface(0.2, 1.0), FX, S, t)
+    np.testing.assert_allclose(grid, 0.2, rtol=1e-12)
+
+
+def test_local_vol_is_positive_and_finite_on_example():
+    S = np.linspace(0.7, 1.6, 51)
+    for T in [0.0, 0.002, 0.1, 0.5, 1.0]:
+        vols = np.asarray(local_vol_grid(SURFACE, FX, S, [T])).ravel()
+        assert np.all(np.isfinite(vols))
+        assert np.all(vols > 0.0)
+
+
+def test_local_volatility_matches_class_evaluation():
+    lv = LocalVolSurface(SURFACE, FX)
+    assert float(local_volatility(SURFACE, FX, 1.10, 0.5)) == pytest.approx(
+        float(lv.sigma(1.10, 0.5))
+    )
+    # a short-maturity limit is well defined (no division by T)
+    assert np.isfinite(float(local_volatility(SURFACE, FX, 1.10, 0.0)))
+
+
+def test_local_vol_grid_rejects_non_1d():
+    with pytest.raises(ValueError):
+        local_vol_grid(SURFACE, FX, np.ones((2, 2)), np.ones(3))
+
+
+def test_dupire_agrees_with_call_price_formula():
+    """Dupire's local variance matches the call-price equation
+    ``sigma_loc^2 = (C_T + (r-q) K C_K + q C) / (K^2 C_KK / 2)``.
+    """
+    lv = LocalVolSurface(SURFACE, FX)
+    K, T = 1.10, 0.4
+    dK, dT = 1e-5, 1e-5
+
+    def call(k, t):
+        w = lv._state(k, t)[0]
+        return price_vanilla(
+            FX.S0, k, FX.r, FX.q, np.sqrt(w / t), t, True
+        )
+
+    C = call(K, T)
+    CT = (call(K, T + dT) - call(K, T - dT)) / (2.0 * dT)
+    CK = (call(K + dK, T) - call(K - dK, T)) / (2.0 * dK)
+    CKK = (call(K + dK, T) - 2.0 * C + call(K - dK, T)) / (dK**2)
+    sigma2_price = (CT + (FX.r - FX.q) * K * CK + FX.q * C) / (0.5 * K**2 * CKK)
+    assert float(lv.sigma(K, T)) ** 2 == pytest.approx(sigma2_price, rel=1e-6)
+
+
+def test_check_arbitrage_flat_surface_is_clean():
+    report = check_arbitrage(flat_surface(0.2, 1.0), FX)
+    assert report["calendar_ok"] is True
+    assert report["butterfly_ok"] is True
+    assert report["min_calendar_slope"] > 0.0
+    assert report["min_butterfly_g"] >= 0.0
+
+
+def test_check_arbitrage_flags_calendar_violation():
+    # second tenor at a much lower vol implies falling total variance
+    low = {field: (0.0, 0.0) for field in QUOTE_FIELDS}
+    low["atm"] = (4.0, 4.0)
+    high = {field: (0.0, 0.0) for field in QUOTE_FIELDS}
+    high["atm"] = (20.0, 20.0)
+    surface = VolSurface.from_quotes({"3M": high, "6M": low})
+    report = check_arbitrage(surface, FX)
+    assert report["calendar_ok"] is False
+
+
+def test_check_arbitrage_accepts_custom_grid():
+    report = check_arbitrage(
+        SURFACE, FX, strikes=[1.0, 1.1, 1.2], maturities=[0.25, 0.5]
+    )
+    assert set(report) == {
+        "calendar_ok",
+        "butterfly_ok",
+        "min_calendar_slope",
+        "min_butterfly_g",
+    }
 
 
 def test_build_sigma_grid_flat_surface_is_constant():
@@ -372,9 +492,9 @@ def test_build_sigma_grid_discrete_does_not_mask():
     t = np.linspace(0.0, 0.5, 6)
     grid = build_sigma_grid(SURFACE, FX, bar, S, t)
     assert np.all(np.isfinite(grid))
-    # a discrete barrier never kills nodes, so every column is the raw
-    # sigma_for_strike value -- no edge-column backfill anywhere
-    expected = np.stack([sigma_for_strike(SURFACE, FX, S, ti) for ti in t])
+    # a discrete barrier never kills nodes, so the grid is exactly the raw
+    # Dupire local vol -- no edge-column backfill anywhere
+    expected = local_vol_grid(SURFACE, FX, S, t)
     np.testing.assert_allclose(grid, expected)
 
 
@@ -464,6 +584,43 @@ def test_monte_carlo_paths_rejects_wrong_sigma_length():
         monte_carlo_paths(FX, Z, sigma=np.ones(4))
 
 
+def test_price_barrier_mc_uses_surface_term_structure():
+    steps = stepwise_sigmas_for_strike(SURFACE, FX, UP.H, FX.T, 24)
+    Z = gen_normals(4000, 24, seed=0)
+    flat_price, _ = price_barrier_mc(FX, UP, n_paths=4000, n_steps=24, seed=0, Z=Z)
+    surf_price, se = price_barrier_mc(
+        FX, UP, n_paths=4000, n_steps=24, seed=0, Z=Z, sigma=steps
+    )
+    assert np.isfinite(surf_price) and se > 0.0
+    assert surf_price != flat_price
+
+
+def test_price_barrier_mc_constant_term_structure_matches_scalar():
+    Z = gen_normals(2000, 16, seed=3)
+    steps = np.full(16, 0.10)
+    arr, _ = price_barrier_mc(
+        FX, UP, n_paths=2000, n_steps=16, seed=3, Z=Z, sigma=steps
+    )
+    scalar, _ = price_barrier_mc(
+        FX, UP, n_paths=2000, n_steps=16, seed=3, Z=Z, sigma=0.10
+    )
+    assert arr == pytest.approx(scalar)
+
+
+def test_price_barrier_mc_rejects_wrong_sigma_length():
+    Z = gen_normals(10, 5, seed=0)
+    with pytest.raises(ValueError):
+        price_barrier_mc(
+            FX, UP, n_paths=10, n_steps=5, seed=0, Z=Z, sigma=np.ones(4)
+        )
+
+
+def test_barrier_hits_rejects_wrong_sigma_length():
+    S = monte_carlo_paths(FX, gen_normals(10, 5, seed=0))
+    with pytest.raises(ValueError, match="sigma must be scalar"):
+        barrier_hits(S, FX, UP, sigma=np.ones(4))
+
+
 # --------------------------------------------------------------------------
 # PDE integration
 # --------------------------------------------------------------------------
@@ -480,6 +637,25 @@ def test_pde_with_flat_surface_matches_flat_solver(bar):
     assert pde_knock_out(FX, bar, M=M, N=N, surface=flat) == pytest.approx(
         base, abs=1e-12
     )
+
+
+def test_pde_knock_in_with_flat_surface_matches_flat_solver():
+    knock_in = BarrierSpec("up-and-in", "continuous", 1.20, 1.10, True)
+    flat = flat_surface(FX.sigma, FX.T)
+    base = price_barrier_pde(FX, knock_in, M=60, N=60)
+    assert price_barrier_pde(
+        FX, knock_in, M=60, N=60, surface=flat
+    ) == pytest.approx(base, abs=1e-10)
+
+
+def test_vanilla_leg_vol_follows_surface_strike_vol():
+    from crossbar.pde import _vanilla_leg_vol
+
+    assert _vanilla_leg_vol(FX, UP) == FX.sigma
+    expected = float(sigma_for_strike(SURFACE, FX, UP.K, FX.T))
+    assert _vanilla_leg_vol(FX, UP, SURFACE) == pytest.approx(expected)
+    # the surface strike vol differs from the ATM vol, so parity moves
+    assert expected != pytest.approx(FX.sigma)
 
 
 def test_pde_surface_with_vol_surface_is_finite_and_finite_knock_in():

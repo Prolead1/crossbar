@@ -25,7 +25,7 @@ from .monte_carlo import (
     price_barrier_mc,
 )
 from .params import BarrierSpec, BSParams, barrier_variants
-from .pde import pde_surface
+from .pde import _vanilla_leg_vol, pde_surface
 
 
 def _extract_price(result) -> float:
@@ -118,6 +118,7 @@ def mc_risk_profile(
     seed: int = 0,
     control_variate: bool = True,
     Z=None,
+    sigma=None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Monte Carlo price, delta and gamma from one set of random paths.
 
@@ -128,7 +129,8 @@ def mc_risk_profile(
     differences are the same as calling :func:`risk_profile` with a fixed
     ``seed`` -- without redrawing (and re-simulating) the paths three
     times per spot.  Pass ``Z`` to share the draws with a separate
-    :func:`crossbar.price_barrier_mc` call.
+    :func:`crossbar.price_barrier_mc` call, and ``sigma`` for a scalar or
+    length-``n_steps`` instantaneous-vol term structure.
     """
     spots = np.asarray(spots, dtype=float)
     if Z is None:
@@ -136,7 +138,7 @@ def mc_risk_profile(
     # Simulate the log-return increments once.  GBM paths are linear in the
     # spot, so every bumped revaluation is the same paths with a different
     # ``log(S0)`` added -- no redraw and no re-simulation per bump.
-    log_paths = log_price_increments(bs, Z)
+    log_paths = log_price_increments(bs, Z, sigma=sigma)
 
     prices = np.empty_like(spots)
     deltas = np.empty_like(spots)
@@ -152,6 +154,7 @@ def mc_risk_profile(
                 seed=seed,
                 control_variate=control_variate,
                 S=S,
+                sigma=sigma,
             )
         )
 
@@ -206,19 +209,20 @@ def surface_risk_profile(S: np.ndarray, V: np.ndarray, spots) -> Tuple[
     return prices, deltas, gammas
 
 
-def _vanilla_greeks(bs: BSParams, bar: BarrierSpec, spots):
+def _vanilla_greeks(bs: BSParams, bar: BarrierSpec, spots, sigma=None):
     """Analytic Black-Scholes delta and gamma for the vanilla leg."""
     spots = np.asarray(spots, dtype=float)
+    sigma = bs.sigma if sigma is None else sigma
     sqrtT = np.sqrt(bs.T)
-    d1 = (np.log(spots / bar.K) + (bs.r - bs.q + 0.5 * bs.sigma**2) * bs.T) / (
-        bs.sigma * sqrtT
+    d1 = (np.log(spots / bar.K) + (bs.r - bs.q + 0.5 * sigma**2) * bs.T) / (
+        sigma * sqrtT
     )
     disc_q = np.exp(-bs.q * bs.T)
     if bar.is_call:
         delta = disc_q * norm.cdf(d1)
     else:
         delta = -disc_q * norm.cdf(-d1)
-    gamma = disc_q * norm.pdf(d1) / (spots * bs.sigma * sqrtT)
+    gamma = disc_q * norm.pdf(d1) / (spots * sigma * sqrtT)
     return delta, gamma
 
 
@@ -269,11 +273,12 @@ def pde_risk_profile(
     )
     delta_out, gamma_out = _surface_derivatives(S, V_out)
     E, F = barrier_rebate_terms(bs, bar)
+    sigma_leg = _vanilla_leg_vol(bs, bar, surface)
 
     prices = price_vanilla(
-        spots, bar.K, bs.r, bs.q, bs.sigma, bs.T, bar.is_call
+        spots, bar.K, bs.r, bs.q, sigma_leg, bs.T, bar.is_call
     ) - np.interp(spots, S, V_out) + E + F
-    v_delta, v_gamma = _vanilla_greeks(bs, bar, spots)
+    v_delta, v_gamma = _vanilla_greeks(bs, bar, spots, sigma=sigma_leg)
     deltas = v_delta - np.interp(spots, S, delta_out)
     gammas = v_gamma - np.interp(spots, S, gamma_out)
     return prices, deltas, gammas

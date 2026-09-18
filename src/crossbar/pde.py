@@ -322,7 +322,9 @@ def _knock_out_surface(
 
     for n in range(N, 0, -1):
         dt = t[n] - t[n - 1]
-        # Earlier time row: a first-order-in-time choice for a crude local vol.
+        # Earlier time row: the local-vol grid feeds the diffusion at the
+        # start of the step (first order in time, as for a time-dependent
+        # sigma).
         sig = None if sigma_grid is None else sigma_grid[n - 1, 1:M]
         if (N - n) < rannacher_pairs:
             h = 0.5 * dt
@@ -350,6 +352,21 @@ def pde_knock_out(
     """Price a knock-out by backward PDE induction (continuous or discrete)."""
     S, V = _knock_out_surface(bs, bar, M, N, rannacher_pairs, monitor_steps, surface)
     return float(np.interp(bs.S0, S, V))
+
+
+def _vanilla_leg_vol(bs: BSParams, bar: BarrierSpec, surface=None) -> float:
+    """Implied vol for the knock-in parity vanilla leg.
+
+    Under a local-vol surface the model vanilla price is the market one,
+    i.e. Black-Scholes at the surface vol for the strike, so knock-in
+    parity uses that rather than the ATM vol.  Without a surface the flat
+    ``bs.sigma`` is returned.
+    """
+    if surface is None:
+        return bs.sigma
+    from .vol_surface import sigma_for_strike
+
+    return float(sigma_for_strike(surface, bs, bar.K, bs.T))
 
 
 def pde_surface(
@@ -382,7 +399,7 @@ def pde_surface(
     )
     E, F = barrier_rebate_terms(bs, bar)
     V = price_vanilla(
-        S, bar.K, bs.r, bs.q, bs.sigma, bs.T, bar.is_call
+        S, bar.K, bs.r, bs.q, _vanilla_leg_vol(bs, bar, surface), bs.T, bar.is_call
     ) - V_out + E + F
     return S, V
 
@@ -416,7 +433,9 @@ def price_barrier_pde(
         raise NotImplementedError(
             "PDE knock-in rebates are only supported for continuous monitoring"
         )
-    vanilla = price_vanilla(bs.S0, bar.K, bs.r, bs.q, bs.sigma, bs.T, bar.is_call)
+    vanilla = price_vanilla(
+        bs.S0, bar.K, bs.r, bs.q, _vanilla_leg_vol(bs, bar, surface), bs.T, bar.is_call
+    )
     out_spec = replace(bar, barrier_type=bar.barrier_type.replace("in", "out"))
     v_out = pde_knock_out(
         bs,

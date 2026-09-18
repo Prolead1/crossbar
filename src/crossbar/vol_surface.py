@@ -9,18 +9,22 @@ pricing engines:
   the 25d/10d call and put vols.  The full delta smile is the piecewise
   linear interpolation through those five points.
 * :class:`VolSurface` collects one :class:`VolSmile` per tenor, keyed by
-  time to maturity in years, and interpolates linearly in maturity at a
-  fixed delta (:meth:`VolSurface.interp_sigma`), clamping outside the
-  quoted range.
-* :func:`stepwise_sigmas_from_surface` turns the implied term structure at
-  a chosen delta into a sequence of piecewise-constant *instantaneous
-  forward* vols whose cumulative variance reproduces the quoted implied
-  variance, so :func:`crossbar.monte_carlo.monte_carlo_paths` can evolve
-  the underlying under a time-varying ``sigma(t)``.
-* :func:`strike_from_delta`, :func:`sigma_for_strike` and
-  :func:`build_sigma_grid` translate the delta-quoted surface into a
-  ``sigma(S, t)`` grid that the finite-difference scheme can consume as a
-  crude local-volatility surface.
+  time to maturity in years.  The smile is evaluated at a fixed signed
+  delta (linear, clamped), and the resulting *total variance* is
+  interpolated linearly in maturity, which is the standard
+  calendar-arbitrage-free choice (:meth:`VolSurface.total_variance`).
+  Outside the quoted tenors the vol is held flat.
+* :func:`stepwise_sigmas_from_surface` and
+  :func:`stepwise_sigmas_for_strike` turn the implied term structure at a
+  chosen delta or strike into piecewise-constant *instantaneous forward*
+  vols whose cumulative variance reproduces the quoted implied variance,
+  so :func:`crossbar.monte_carlo.monte_carlo_paths` can evolve the
+  underlying under a time-varying ``sigma(t)``.
+* :class:`LocalVolSurface` converts the implied surface into a proper
+  *Dupire local-volatility* surface.  :func:`build_sigma_grid` feeds its
+  ``sigma_loc(S, t)`` grid to the finite-difference scheme, and
+  :func:`check_arbitrage` screens the implied surface for calendar and
+  butterfly arbitrage.
 
 Conventions
 -----------
@@ -41,6 +45,7 @@ from __future__ import annotations
 from typing import Dict, Iterable, Mapping, Optional, Tuple
 
 import numpy as np
+from scipy.interpolate import CubicSpline
 from scipy.stats import norm
 
 from .params import BSParams, BarrierSpec
@@ -57,6 +62,11 @@ __all__ = [
     "strike_from_delta",
     "sigma_for_strike",
     "stepwise_sigmas_from_surface",
+    "stepwise_sigmas_for_strike",
+    "LocalVolSurface",
+    "local_volatility",
+    "local_vol_grid",
+    "check_arbitrage",
     "build_sigma_grid",
     "total_variance_grid",
     "plot_vol_surface",
@@ -292,25 +302,46 @@ class VolSurface:
         """Build a surface from ``{tenor: {field: (bid, ask)}}`` quotes."""
         return cls(VolSmile.from_quotes(tenor, q) for tenor, q in quotes.items())
 
-    def interp_sigma(self, T: float, delta) -> float:
-        """Vol at maturity ``T`` for signed ``delta``, linear in maturity.
+    def total_variance(self, T: float, delta):
+        """Implied total variance ``w = sigma(T, delta)^2 T`` for signed ``delta``.
 
         The smile at each quoted maturity is evaluated first (linear in
-        delta, clamped), then interpolated linearly in ``T`` and clamped
-        to the first/last quoted maturity.
+        delta, clamped) and turned into total variance; the variance is
+        then interpolated linearly in ``T`` at fixed ``delta``.  Below the
+        first tenor the variance is linear from the origin (so the vol is
+        flat), and above the last tenor it grows at the last quoted vol,
+        which keeps the forward variance positive.
         """
         delta_arr = np.asarray(delta, dtype=float)
         mats = self.maturities
         if delta_arr.ndim == 0:
             sig = np.array([self.smiles[t].sigma(float(delta_arr)) for t in mats])
-            val = np.interp(float(T), mats, sig)
-            return float(val)
-        # element-wise across an array of deltas
+            return _interp_total_variance(T, mats, sig**2 * mats)
         per_mat = np.stack([self.smiles[t].sigma(delta_arr) for t in mats], axis=0)
         out = np.empty_like(delta_arr)
         for i in range(delta_arr.size):
-            out.flat[i] = np.interp(float(T), mats, per_mat[:, i])
+            out.flat[i] = _interp_total_variance(
+                T, mats, per_mat[:, i] ** 2 * mats
+            )
         return out
+
+    def interp_sigma(self, T: float, delta) -> float:
+        """Vol at maturity ``T`` for signed ``delta``, linear in total variance.
+
+        The smile at each quoted maturity is evaluated first (linear in
+        delta, clamped), then the *total variance* is interpolated
+        linearly in ``T`` and clamped to the first/last quoted maturity.
+        Interpolating variance rather than vol is the standard
+        calendar-arbitrage-free choice; a flat vol surface is unaffected.
+        """
+        T = float(T)
+        if T <= 0.0:
+            # The implied vol is only defined for a positive maturity; the
+            # natural limit is the flat short-end vol (total variance is
+            # linear from the origin).
+            t0 = self.maturities[0]
+            return np.sqrt(self.total_variance(t0, delta) / t0)
+        return np.sqrt(self.total_variance(T, delta) / T)
 
 
 # --------------------------------------------------------------------------
@@ -374,16 +405,25 @@ def _pillar_strikes(
     return np.log(strikes[order]), vols[order]
 
 
-def _interp_maturity(T: float, mats: np.ndarray, per_mat: np.ndarray):
-    """Linear interpolation of a ``(n_maturities, ...)`` stack at scalar ``T``."""
+def _interp_total_variance(T: float, mats: np.ndarray, w_stack: np.ndarray):
+    """Interpolate total variance in maturity at a fixed smile/delta point.
+
+    ``w_stack`` holds ``sigma^2 t`` at each quoted maturity.  Between two
+    tenors the variance is linear in ``T``; below the first tenor it is
+    linear from the origin and above the last it continues at the last
+    quoted vol.  Both extensions keep the vol flat and the forward
+    variance positive, and they match the clamping of the old vol-space
+    interpolation for a constant surface.
+    """
+    T = float(T)
     if T <= mats[0]:
-        return per_mat[0]
+        return w_stack[0] * (T / mats[0])
     if T >= mats[-1]:
-        return per_mat[-1]
+        return w_stack[-1] * (T / mats[-1])
     i = int(np.searchsorted(mats, T))
     t0, t1 = mats[i - 1], mats[i]
-    w = (T - t0) / (t1 - t0)
-    return (1.0 - w) * per_mat[i - 1] + w * per_mat[i]
+    a = (T - t0) / (t1 - t0)
+    return (1.0 - a) * w_stack[i - 1] + a * w_stack[i]
 
 
 def strike_from_delta(
@@ -421,6 +461,23 @@ def strike_from_delta(
     return strike
 
 
+def _strike_vols_per_maturity(surface: VolSurface, params: BSParams, strikes):
+    """Implied vol at ``strikes`` for every quoted maturity.
+
+    Returns a ``(n_maturities, ...)`` array: at each maturity the pillar
+    deltas are converted into strikes with their own quoted vols, and the
+    smile is read linearly in log-strike (clamped).
+    """
+    log_strikes = np.log(np.asarray(strikes, dtype=float))
+    curves = [
+        _pillar_strikes(surface.smiles[float(t)], params, float(t))
+        for t in surface.maturities
+    ]
+    return np.stack(
+        [np.interp(log_strikes, logK, vols) for logK, vols in curves], axis=0
+    )
+
+
 def sigma_for_strike(
     surface: VolSurface, params: BSParams, K, T: float
 ) -> float:
@@ -428,21 +485,15 @@ def sigma_for_strike(
 
     At every quoted maturity the pillar deltas are converted into strikes
     using their own quoted vols, so the vol can be interpolated linearly
-    in log-strike; the per-maturity results are then interpolated linearly
-    in maturity and clamped at both ends.
+    in log-strike.  The resulting *total variance* is then interpolated
+    linearly in maturity (flat vol outside the quoted range).
     """
     K_arr = np.asarray(K, dtype=float)
-    mats = surface.maturities
-    per_mat = np.stack(
-        [
-            np.interp(
-                np.log(K_arr), *_pillar_strikes(surface.smiles[t], params, t)
-            )
-            for t in mats
-        ],
-        axis=0,
-    )
-    return _interp_maturity(float(T), mats, per_mat)
+    per_mat = _strike_vols_per_maturity(surface, params, K_arr)
+    if float(T) <= 0.0:
+        return per_mat[0]
+    w_stack = per_mat**2 * surface.maturities.reshape((-1,) + (1,) * K_arr.ndim)
+    return np.sqrt(_interp_total_variance(T, surface.maturities, w_stack) / float(T))
 
 
 # --------------------------------------------------------------------------
@@ -450,15 +501,47 @@ def sigma_for_strike(
 # --------------------------------------------------------------------------
 
 
+def _forward_vols(variance: np.ndarray, T: float, n_steps: int) -> np.ndarray:
+    """Piecewise-constant forward vols from a total-variance path."""
+    fwd_var = np.diff(np.asarray(variance, dtype=float))
+    fwd_var = np.maximum(fwd_var, 0.0)  # guard tiny negative round-off
+    return np.sqrt(fwd_var / (float(T) / n_steps))
+
+
 def stepwise_sigmas_from_surface(
     surface: VolSurface, T: float, n_steps: int, delta: float = 0.0
 ) -> np.ndarray:
     """Piecewise-constant instantaneous forward vols to maturity ``T``.
 
-    The implied variance ``w(t) = sigma_impl(t)^2 t`` is read off the
-    surface at the ``n_steps + 1`` time nodes for the chosen ``delta``;
-    the forward vol on each step is ``sqrt(dw / dt)``, so cumulative
-    variance matches the quoted term structure.
+    The implied total variance ``w(t) = sigma_impl(t)^2 t`` is read off
+    the surface at the ``n_steps + 1`` time nodes for the chosen
+    ``delta``; the forward vol on each step is ``sqrt(dw / dt)``, so
+    cumulative variance matches the quoted term structure.  This is a
+    *sticky-delta* (fixed moneyness) term structure.
+    """
+    T = float(T)
+    n_steps = int(n_steps)
+    if T <= 0:
+        raise ValueError("maturity must be strictly positive")
+    if n_steps < 1:
+        raise ValueError("n_steps must be at least 1")
+
+    t = np.linspace(0.0, T, n_steps + 1)
+    variance = np.array(
+        [surface.total_variance(t[i], delta) for i in range(n_steps + 1)]
+    )
+    return _forward_vols(variance, T, n_steps)
+
+
+def stepwise_sigmas_for_strike(
+    surface: VolSurface, params: BSParams, K: float, T: float, n_steps: int
+) -> np.ndarray:
+    """Forward vols at a *fixed strike* up to maturity ``T``.
+
+    The implied variance at ``K`` is read off :func:`sigma_for_strike` at
+    every time node, so the cumulative variance matches the quoted
+    smile at that strike.  This is the *sticky-strike* term structure,
+    the natural input for a barrier whose level pins the relevant vol.
     """
     T = float(T)
     n_steps = int(n_steps)
@@ -470,12 +553,224 @@ def stepwise_sigmas_from_surface(
     t = np.linspace(0.0, T, n_steps + 1)
     variance = np.zeros(n_steps + 1)
     for i in range(1, n_steps + 1):
-        sig = float(surface.interp_sigma(t[i], delta))
+        sig = float(sigma_for_strike(surface, params, K, t[i]))
         variance[i] = sig * sig * t[i]
-    fwd_var = np.diff(variance)
-    fwd_var = np.maximum(fwd_var, 0.0)  # guard tiny negative round-off
-    dt = T / n_steps
-    return np.sqrt(fwd_var / dt)
+    return _forward_vols(variance, T, n_steps)
+
+
+# --------------------------------------------------------------------------
+# Dupire local volatility
+# --------------------------------------------------------------------------
+
+
+class LocalVolSurface:
+    """Dupire local volatility implied by a delta-quoted :class:`VolSurface`.
+
+    The implied total variance ``w = sigma_imp^2 T`` is represented as a
+    function of log-strike on each quoted maturity (a clamped cubic spline
+    through the five pillars, held flat in vol outside them) and
+    interpolated linearly in maturity at fixed strike.  Dupire's formula
+    in log-forward-moneyness ``y = log(K / F_T)`` then gives the local
+    variance
+
+    .. math::
+
+        \\sigma_{loc}^2 = \\frac{\\partial_T w}
+        {1 - \\frac{y}{w}\\partial_y w
+         + \\frac14\\left(-\\frac14 - \\frac1w + \\frac{y^2}{w^2}\\right)
+           (\\partial_y w)^2
+         + \\frac12 \\partial^2_y w}.
+
+    where ``\\partial_T w`` is taken at fixed moneyness and all
+    ``\\partial_y`` derivatives at fixed maturity.  A flat implied-vol
+    surface reproduces that constant exactly, and a strike-independent
+    term structure reproduces the quoted forward variance.  The
+    denominator is the same quantity whose positivity is the
+    butterfly-arbitrage condition (see :func:`check_arbitrage`); where it
+    turns negative the local variance is floored at a small positive
+    value.
+    """
+
+    def __init__(self, surface: VolSurface, params: BSParams) -> None:
+        self.surface = surface
+        self.params = params
+        self.maturities = np.asarray(surface.maturities, dtype=float)
+        self._logK = []
+        self._splines = []
+        for t in self.maturities:
+            logK, vols = _pillar_strikes(surface.smiles[float(t)], params, float(t))
+            w = vols**2 * float(t)
+            self._logK.append(logK)
+            # Clamped zero slope at the 10-delta wings matches the flat-vol
+            # extrapolation used everywhere else and is far better behaved
+            # than a natural spline on the tiny short-dated variance range.
+            self._splines.append(
+                CubicSpline(logK, w, bc_type=((1, 0.0), (1, 0.0)), extrapolate=True)
+            )
+
+    def _strike_derivatives(self, K, deriv: int) -> np.ndarray:
+        """Per-maturity ``d^deriv w / d(log K)^deriv`` at ``K``.
+
+        The spline is evaluated on the pillar log-strike range and held
+        flat in vol (so the value is the boundary variance and every
+        derivative is zero) outside it.
+        """
+        lk = np.log(np.asarray(K, dtype=float))
+        out = np.empty((self.maturities.size,) + lk.shape)
+        for i, (logK, spline) in enumerate(zip(self._logK, self._splines)):
+            clamped = np.clip(lk, logK[0], logK[-1])
+            value = spline(clamped, deriv)
+            if deriv:
+                outside = (lk < logK[0]) | (lk > logK[-1])
+                value = np.where(outside, 0.0, value)
+            out[i] = value
+        return out
+
+    def _state(self, K, T):
+        """``(w, w_y/w, w_y^2/w, w_yy, w_T)`` at ``K`` and scalar ``T``.
+
+        Quantities are returned in the form that stays finite as ``T``
+        tends to zero, so the same expression serves the local variance
+        and the butterfly density test.
+        """
+        K = np.asarray(K, dtype=float)
+        T = float(T)
+        mats = self.maturities
+        wv = self._strike_derivatives(K, 0)
+        wy = self._strike_derivatives(K, 1)
+        wyy = self._strike_derivatives(K, 2)
+
+        if T <= mats[0] or T >= mats[-1]:
+            i = 0 if T <= mats[0] else -1
+            unit, du, duu = wv[i], wy[i], wyy[i]
+            nu = T / mats[i]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio = np.where(unit > 0.0, du / unit, 0.0)
+            return unit * nu, ratio, nu * du * ratio, nu * duu, unit / mats[i]
+
+        i = int(np.searchsorted(mats, T))
+        t0, t1 = mats[i - 1], mats[i]
+        a = (T - t0) / (t1 - t0)
+        w = (1.0 - a) * wv[i - 1] + a * wv[i]
+        dw = (1.0 - a) * wy[i - 1] + a * wy[i]
+        dwv = (1.0 - a) * wyy[i - 1] + a * wyy[i]
+        wT = (wv[i] - wv[i - 1]) / (t1 - t0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(w > 0.0, dw / w, 0.0)
+        return w, ratio, dw * ratio, dwv, wT
+
+    def sigma(self, K, T):
+        """Dupire local volatility at ``K`` (scalar or array), scalar ``T``."""
+        params = self.params
+        T = float(T)
+        w, ratio, dwsq_over_w, dww, wT = self._state(K, T)
+        forward = params.S0 * np.exp((params.r - params.q) * T)
+        y = np.log(np.asarray(K, dtype=float) / forward)
+        denom = (
+            1.0
+            - y * ratio
+            + 0.25
+            * (-0.25 * w * w * ratio * ratio - dwsq_over_w + (y * ratio) ** 2)
+            + 0.5 * dww
+        )
+        # w_T in the formula is at fixed moneyness; ``wT`` comes from the
+        # fixed-strike interpolation, so shift by (r - q) w_y as the
+        # forward moneyness drifts with maturity.
+        numerator = wT + (params.r - params.q) * w * ratio
+        with np.errstate(divide="ignore", invalid="ignore"):
+            variance = np.where(
+                denom > 0.0, numerator / np.where(denom > 0.0, denom, 1.0), 0.0
+            )
+        return np.sqrt(np.maximum(variance, 1e-12))
+
+    def butterfly_g(self, K, T):
+        """Gatheral's density factor ``g`` at ``K`` and scalar ``T``.
+
+        ``g >= 0`` everywhere is equivalent to a non-negative
+        risk-neutral density (no butterfly arbitrage).
+        """
+        params = self.params
+        T = float(T)
+        w, ratio, _, dww, _ = self._state(K, T)
+        forward = params.S0 * np.exp((params.r - params.q) * T)
+        y = np.log(np.asarray(K, dtype=float) / forward)
+        return (
+            (1.0 - 0.5 * y * ratio) ** 2
+            - 0.25 * ratio
+            - 0.0625 * w * ratio
+            + 0.5 * dww
+        )
+
+    def grid(self, S_grid, t_grid) -> np.ndarray:
+        """Local vol on a ``(time, spot)`` mesh."""
+        S_grid = np.asarray(S_grid, dtype=float)
+        t_grid = np.asarray(t_grid, dtype=float)
+        out = np.empty((t_grid.size, S_grid.size))
+        for i, t in enumerate(t_grid):
+            out[i] = self.sigma(S_grid, t)
+        return out
+
+
+def local_volatility(surface: VolSurface, params: BSParams, K, T) -> float:
+    """Dupire local vol at ``K`` and scalar ``T`` (convenience wrapper)."""
+    return LocalVolSurface(surface, params).sigma(K, T)
+
+
+def local_vol_grid(surface: VolSurface, params: BSParams, S_grid, t_grid) -> np.ndarray:
+    """Dupire local-vol grid ``sigma_loc(S, t)`` on a finite-difference mesh."""
+    S_grid = np.asarray(S_grid, dtype=float)
+    t_grid = np.asarray(t_grid, dtype=float)
+    if S_grid.ndim != 1 or t_grid.ndim != 1:
+        raise ValueError("S_grid and t_grid must be one-dimensional")
+    return LocalVolSurface(surface, params).grid(S_grid, t_grid)
+
+
+def check_arbitrage(
+    surface: VolSurface,
+    params: BSParams,
+    strikes=None,
+    maturities=None,
+    tol: float = 1e-10,
+) -> dict:
+    """Screen a surface for calendar and butterfly arbitrage.
+
+    Calendar arbitrage is a negative slope of total variance in maturity
+    at fixed strike; butterfly arbitrage is a negative Gatheral density
+    factor ``g`` (a non-negative risk-neutral density requires
+    ``g >= 0``).  Both are evaluated on a log-strike grid (the quoted
+    pillar range by default) and across the quoted maturities plus their
+    midpoints.
+
+    Returns a dict with ``calendar_ok``/``butterfly_ok`` flags and the
+    worst observed slope/factor.
+    """
+    lv = LocalVolSurface(surface, params)
+    if strikes is None:
+        logK = np.concatenate(
+            [
+                _pillar_strikes(surface.smiles[float(t)], params, float(t))[0]
+                for t in surface.maturities
+            ]
+        )
+        strikes = np.linspace(np.exp(logK.min()), np.exp(logK.max()), 41)
+    strikes = np.asarray(strikes, dtype=float)
+
+    if maturities is None:
+        m = np.asarray(surface.maturities, dtype=float)
+        mids = 0.5 * (m[:-1] + m[1:]) if m.size > 1 else np.empty(0)
+        maturities = np.sort(np.concatenate([m, mids]))
+    maturities = np.asarray(maturities, dtype=float)
+
+    slopes = np.array([float(np.min(lv._state(strikes, t)[4])) for t in maturities])
+    density = np.array(
+        [float(np.min(lv.butterfly_g(strikes, t))) for t in maturities]
+    )
+    return {
+        "calendar_ok": bool(np.min(slopes) >= -tol),
+        "butterfly_ok": bool(np.min(density) >= -tol),
+        "min_calendar_slope": float(np.min(slopes)),
+        "min_butterfly_g": float(np.min(density)),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -490,21 +785,19 @@ def build_sigma_grid(
     S_grid,
     t_grid,
 ) -> np.ndarray:
-    """Implied-vol grid ``sigma(S, t)`` on a finite-difference mesh.
+    """Local-vol grid ``sigma_loc(S, t)`` on a finite-difference mesh.
 
-    Each node is valued through :func:`sigma_for_strike` with the asset
-    level as the strike, giving a crude local-volatility surface.  Nodes
-    beyond the barrier are dead under continuous monitoring, so they are
-    filled with the live edge vol to keep the stencil well behaved.
+    The grid comes from :func:`local_vol_grid`, i.e. Dupire's local
+    volatility calibrated to the implied surface.  Nodes beyond the
+    barrier are dead under continuous monitoring, so they are filled with
+    the live edge vol to keep the stencil well behaved.
     """
     S_grid = np.asarray(S_grid, dtype=float)
     t_grid = np.asarray(t_grid, dtype=float)
     if S_grid.ndim != 1 or t_grid.ndim != 1:
         raise ValueError("S_grid and t_grid must be one-dimensional")
 
-    grid = np.empty((t_grid.size, S_grid.size))
-    for i, t in enumerate(t_grid):
-        grid[i] = np.asarray(sigma_for_strike(surface, params, S_grid, t), dtype=float)
+    grid = local_vol_grid(surface, params, S_grid, t_grid)
 
     live = S_grid < bar.H if bar.is_up else S_grid > bar.H
     if bar.monitor == "continuous" and not live.all():
@@ -521,31 +814,19 @@ def build_sigma_grid(
 def total_variance_grid(surface: VolSurface, params: BSParams, strikes, maturities):
     """Total implied variance ``w(T, K) = sigma(T, K)^2 T`` on a grid.
 
-    Returns an ``(len(maturities), len(strikes))`` array.  The vol is
-    interpolated linearly in log-strike at each quoted maturity, then
-    linearly in maturity (clamped at both ends, exactly like
-    :meth:`VolSurface.interp_sigma`), and finally multiplied by ``T``.
-    Interpolating the *vol* rather than the total variance keeps this
-    consistent with :func:`stepwise_sigmas_from_surface`, so a flat vol
-    surface yields ``w = sigma^2 T`` at every maturity.
+    Returns an ``(len(maturities), len(strikes))`` array.  At every quoted
+    maturity the smile is read linearly in log-strike (clamped); the
+    resulting total variance is then interpolated linearly in maturity at
+    fixed strike (flat vol outside the quoted range).  A flat vol surface
+    yields ``w = sigma^2 T`` at every maturity.
     """
     strikes = np.asarray(strikes, dtype=float)
     maturities = np.asarray(maturities, dtype=float)
-    mats = surface.maturities
-    per_mat = np.stack(
-        [
-            np.interp(
-                np.log(strikes),
-                *_pillar_strikes(surface.smiles[t], params, t),
-            )
-            for t in mats
-        ],
-        axis=0,
-    )
+    per_mat = _strike_vols_per_maturity(surface, params, strikes)
+    w_stack = per_mat**2 * surface.maturities.reshape((-1,) + (1,) * strikes.ndim)
     out = np.empty((maturities.size, strikes.size))
     for i, T in enumerate(maturities):
-        sig = _interp_maturity(float(T), mats, per_mat)
-        out[i] = sig * sig * T
+        out[i] = _interp_total_variance(float(T), surface.maturities, w_stack)
     return out
 
 

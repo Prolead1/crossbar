@@ -12,7 +12,8 @@ engines alongside the closed form:
 The engines are validated against Reiner-Rubinstein / Haug closed-form
 prices, and delta/gamma profiles are provided across all eight
 single-barrier variants. A screen-quote volatility surface can be fed to
-the PDE solver as a first-order local-volatility grid.
+the pricing engines: the PDE diffuses on a calibrated Dupire local-vol
+grid, and Monte Carlo follows the implied term structure.
 
 ## Install
 
@@ -113,8 +114,10 @@ no-barrier reference. Which barrier engines run depends on the contract:
 * **continuous barrier, constant vol** → `analytic`, `mc` and `pde`;
 * **discrete barrier** → `mc` and `pde`, plus the continuous-monitoring
   `analytic` value for reference;
-* **vol surface** → `analytic` (at the surface ATM vol) and `pde`; `mc`
-  is skipped.
+* **vol surface** → all three, each under a model implied by the same
+  quotes: `pde` prices the Dupire local-vol surface, `mc` evolves the
+  sticky-strike term structure at the barrier, and `analytic` remains the
+  flat ATM-vol reference.
 
 Skipped engines appear as `n/a` with a short reason under the table.
 
@@ -139,9 +142,15 @@ points**. A complete sample lives at
 }
 ```
 
-The PDE engine then uses a `sigma(S, t)` local-volatility grid built
-from the quotes, while the closed form is priced at the surface ATM vol
-so you still get a constant-vol reference:
+The surface is handled in three steps.  Each smile is read linearly in
+signed delta, the resulting **total variance** is interpolated linearly
+in maturity (the standard calendar-arbitrage-free choice, held flat in
+vol outside the quoted tenors), and the implied surface is converted
+into a proper **Dupire local-volatility** surface.  The PDE engine
+diffuses on that `sigma_loc(S, t)` grid; the Monte Carlo engine evolves
+the sticky-strike term structure read at the barrier level; and the
+closed form is priced at the surface ATM vol so you still get a
+constant-vol reference:
 
 ```bash
 crossbar price -S 1.10 -v examples/vol_surface.json -T 0.5 -r 0.04 -q 0.03 \
@@ -154,19 +163,22 @@ market    : S0=1.1, r=0.04, q=0.03, T=0.5
 vol       : 0.076000 (ATM from surface)
 benchmark : vanilla = 0.025974
 quotes    : examples/vol_surface.json
+mc        : paths=200000, steps=252, seed=0, control_variate=True
 pde       : M=500, N=500, rannacher=1
 
 engine             price         delta         gamma     std_error
 analytic        0.014261      0.143177     -3.434666             -
-mc                   n/a             -             -             -
-pde             0.014753      0.166769     -2.899862             -
-note: mc skipped (Monte Carlo does not use a surface yet)
+mc              0.013490      0.116166     -2.705588      0.000046
+pde             0.012348      0.098171     -2.801006             -
 ```
 
-> This is a first-order "implied-vol-as-local-vol" approximation, not a
-> calibrated Dupire local-vol model, and it currently drives the PDE
-> diffusion only. Monte Carlo is therefore reported as `n/a`; the closed
-> form uses the surface ATM vol as a constant-vol reference.
+> The engines use different (all standard) surface models, so their
+> prices differ: the local-vol PDE is the vanilla-smile-calibrated
+> barrier model, the term-vol Monte Carlo is the cheaper alternative,
+> and the flat closed form is the constant-vol reference.
+> `check_arbitrage` screens the quotes for calendar and butterfly
+> arbitrage; the local-vol
+> grid also drives the PDE delta/gamma profiles.
 
 ### Output and scripting
 
@@ -311,30 +323,44 @@ simulated log-returns for every bump -- the common-random-numbers
 requirement for a clean finite difference -- making the profile roughly
 1.5x faster with bit-identical output.
 
-**Volatility surface** — build it from quotes, turn the term structure
-into instantaneous forward vols for the Monte Carlo paths, or pass it to
-the PDE:
+**Volatility surface** — build it from quotes, convert it to a Dupire
+local-vol surface, turn a term structure into forward vols for the Monte
+Carlo paths, or pass it straight to the PDE:
 
 ```python
+import numpy as np
 from crossbar import (
     EXAMPLE_QUOTES,
+    LocalVolSurface,
     VolSurface,
+    check_arbitrage,
     gen_normals,
+    local_vol_grid,
     monte_carlo_paths,
+    stepwise_sigmas_for_strike,
     stepwise_sigmas_from_surface,
 )
 
 surface = VolSurface.from_quotes(EXAMPLE_QUOTES)   # or your own dict
 surface.interp_sigma(0.5, 0.10)                    # 0.07985
+surface.total_variance(0.4, 0.10)                  # sigma^2 * T at 0.4y
+check_arbitrage(surface, bs)                       # calendar / butterfly screen
 
-# sigma(t) whose cumulative variance matches the quoted term structure
+# Dupire local vol: scalar, or on a (spot, time) grid for the PDE
+lv = LocalVolSurface(surface, bs)
+lv.sigma(1.10, 0.5)                                # 0.07013
+S = np.linspace(0.8, 1.4, 61)
+local_vol_grid(surface, bs, S, np.linspace(0, 0.5, 26))
+
+# sticky-moneyness or sticky-strike sigma(t) for the Monte Carlo paths
 steps = stepwise_sigmas_from_surface(surface, bs.T, 64, delta=0.0)
+steps_at_H = stepwise_sigmas_for_strike(surface, bs, bar.H, bs.T, 64)
 
 Z = gen_normals(10_000, 64, seed=0)
 paths = monte_carlo_paths(bs, Z, sigma=steps)       # shape (10000, 65)
 
 # local-vol PDE
-price_barrier_pde(bs, bar, M=200, N=200, surface=surface)   # 0.012969
+price_barrier_pde(bs, bar, M=200, N=200, surface=surface)   # 0.010865
 ```
 
 ## Run the tests

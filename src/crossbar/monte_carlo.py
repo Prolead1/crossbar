@@ -156,6 +156,7 @@ def barrier_hits(
     bar: BarrierSpec,
     seed: int = 0,
     chunk_size: int | None = None,
+    sigma=None,
 ):
     """Locate the first barrier hit for each path.
 
@@ -163,7 +164,8 @@ def barrier_hits(
     is the first monitored time index (``1..n_steps``, or ``n_steps + 1``
     when the path never hits).  For continuous monitoring, Brownian-bridge
     crossings between grid points are sampled in addition to discrete
-    hits.
+    hits.  ``sigma`` may be a scalar or a length-``n_steps`` sequence of
+    instantaneous vols, which is used for the per-step bridge variance.
 
     Paths are processed in blocks of ``chunk_size`` so the bridge
     probabilities never materialise as a full ``(n_paths, n_steps)``
@@ -190,7 +192,17 @@ def barrier_hits(
         chunk_size = max(1, 2_000_000 // n_steps)
 
     log_H = np.log(bar.H)
-    var = bs.sigma**2 * dt
+    if sigma is None:
+        var = bs.sigma**2 * dt
+    else:
+        sig = np.asarray(sigma, dtype=float)
+        if sig.ndim == 0:
+            sig = np.full(n_steps, float(sig))
+        elif sig.shape != (n_steps,):
+            raise ValueError(
+                f"sigma must be scalar or have shape ({n_steps},), got {sig.shape}"
+            )
+        var = sig**2 * dt
     u = np.random.default_rng(seed).random(n_paths)
     thresh = 1.0 - u
 
@@ -224,11 +236,13 @@ def barrier_hits(
     return hit, step
 
 
-def _payoff_samples(bs: BSParams, bar: BarrierSpec, S: np.ndarray, seed: int):
+def _payoff_samples(
+    bs: BSParams, bar: BarrierSpec, S: np.ndarray, seed: int, sigma=None
+):
     """Discounted barrier and vanilla payoff samples for path matrix ``S``."""
     n_paths, n_cols = S.shape
     n_steps = n_cols - 1
-    hit, step = barrier_hits(S, bs, bar, seed=seed)
+    hit, step = barrier_hits(S, bs, bar, seed=seed, sigma=sigma)
 
     disc = np.exp(-bs.r * bs.T)
     vanilla_T = vanilla_payoff(S[:, -1], bar.K, bar.is_call)
@@ -252,6 +266,7 @@ def price_barrier(
     seed: int = 0,
     Z=None,
     S=None,
+    sigma=None,
 ):
     """Discounted barrier and vanilla payoff samples.
 
@@ -262,16 +277,18 @@ def price_barrier(
 
     ``Z`` supplies pre-drawn normals and ``S`` an already-simulated path
     matrix; either overrides the sizes above.  Passing ``S`` lets several
-    revaluations share one simulation.
+    revaluations share one simulation.  ``sigma`` may be a scalar or a
+    length-``n_steps`` sequence of instantaneous vols; it is used both to
+    simulate (when ``S`` is not given) and for the bridge variance.
     """
     if S is None:
         if Z is None:
             Z = gen_normals(n_paths, n_steps, seed=seed)
         else:
             n_paths, n_steps = Z.shape
-        S = monte_carlo_paths(bs, Z)
+        S = monte_carlo_paths(bs, Z, sigma)
 
-    return _payoff_samples(bs, bar, S, seed)
+    return _payoff_samples(bs, bar, S, seed, sigma=sigma)
 
 
 def price_barrier_cv(
@@ -282,6 +299,7 @@ def price_barrier_cv(
     seed: int = 0,
     Z=None,
     S=None,
+    sigma=None,
 ) -> np.ndarray:
     """Control-variate adjusted barrier payoff samples.
 
@@ -289,12 +307,21 @@ def price_barrier_cv(
     the sample mean of the returned array is the control-variate price
     estimate.  Pass a pre-drawn ``Z`` or an already-simulated path matrix
     ``S`` to reuse the same paths across revaluations (common random
-    numbers).
+    numbers).  For a time-varying ``sigma`` the control mean is the
+    Black-Scholes price at the effective vol ``sqrt(mean(sigma^2))``,
+    which is exact for deterministic vol.
     """
     X, Y = price_barrier(
-        bs, bar, n_steps=n_steps, n_paths=n_paths, seed=seed, Z=Z, S=S
+        bs, bar, n_steps=n_steps, n_paths=n_paths, seed=seed, Z=Z, S=S, sigma=sigma
     )
-    EY = price_vanilla(bs.S0, bar.K, bs.r, bs.q, bs.sigma, bs.T, is_call=bar.is_call)
+    if sigma is None:
+        sigma_eff = bs.sigma
+    else:
+        sig = np.asarray(sigma, dtype=float)
+        sigma_eff = float(sig) if sig.ndim == 0 else float(np.sqrt(np.mean(sig**2)))
+    EY = price_vanilla(
+        bs.S0, bar.K, bs.r, bs.q, sigma_eff, bs.T, is_call=bar.is_call
+    )
 
     Ym = Y - Y.mean()
     Xm = X - X.mean()
@@ -314,6 +341,7 @@ def price_barrier_mc(
     control_variate: bool = True,
     Z=None,
     S=None,
+    sigma=None,
 ):
     """Monte Carlo barrier price and standard error.
 
@@ -321,14 +349,18 @@ def price_barrier_mc(
     ``Z`` of shape ``(n_paths, n_steps)``, or an already-simulated path
     matrix ``S``, to reuse a fixed set of paths -- for example to share
     common random numbers across the bumps of a finite-difference Greek.
+    ``sigma`` may be a scalar or a length-``n_steps`` sequence of
+    instantaneous vols (see :func:`crossbar.vol_surface.stepwise_sigmas_for_strike`).
     """
     if control_variate:
         samples = price_barrier_cv(
-            bs, bar, n_steps=n_steps, n_paths=n_paths, seed=seed, Z=Z, S=S
+            bs, bar, n_steps=n_steps, n_paths=n_paths, seed=seed, Z=Z, S=S,
+            sigma=sigma,
         )
     else:
         samples = price_barrier(
-            bs, bar, n_steps=n_steps, n_paths=n_paths, seed=seed, Z=Z, S=S
+            bs, bar, n_steps=n_steps, n_paths=n_paths, seed=seed, Z=Z, S=S,
+            sigma=sigma,
         )[0]
 
     price = float(samples.mean())

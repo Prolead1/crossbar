@@ -33,7 +33,7 @@ from .analytic import price_barrier_closed_form, price_vanilla
 from .greeks import mc_risk_profile, pde_risk_profile, risk_profile
 from .monte_carlo import gen_normals, price_barrier_mc
 from .params import BarrierSpec, BSParams, validate_inputs
-from .vol_surface import VolSurface
+from .vol_surface import VolSurface, stepwise_sigmas_for_strike
 
 BARRIER_TYPES = ("up-and-out", "up-and-in", "down-and-out", "down-and-in")
 BARRIER_CODES = {
@@ -393,10 +393,9 @@ def _render_results(p: dict) -> None:
     if p.get("quotes"):
         print(f"{'quotes':<9} : {p['quotes']}")
     for label, key in (("mc", "mc_options"), ("pde", "pde_options")):
-        options = p.get(key)
-        if options:
-            body = ", ".join(f"{k}={v}" for k, v in options.items())
-            print(f"{label:<9} : {body}")
+        options = p[key]
+        body = ", ".join(f"{k}={v}" for k, v in options.items())
+        print(f"{label:<9} : {body}")
 
     print()
     print(
@@ -410,9 +409,6 @@ def _render_results(p: dict) -> None:
         print(
             f"{row['engine']:<10}{price:>14}{delta:>14}{gamma:>14}{se:>14}"
         )
-    for row in p["prices"]:
-        if row.get("note"):
-            print(f"note: {row['engine']} skipped ({row['note']})")
 
 
 # --------------------------------------------------------------------------
@@ -449,48 +445,47 @@ def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
     )
 
     if surface is None:
-        # Draw the paths once and share them between the price and the
-        # delta bumps.  ``mc_risk_profile`` reuses a single simulation for
-        # all three bumps, so the expensive path generation runs once
-        # instead of four times.
-        Z = gen_normals(a.paths, a.steps, seed=a.seed)
-        price, se = price_barrier_mc(
-            bs,
-            bar,
-            n_paths=a.paths,
-            n_steps=a.steps,
-            seed=a.seed,
-            control_variate=a.control_variate,
-            Z=Z,
-        )
-        _, deltas, gammas = mc_risk_profile(
-            bs,
-            bar,
-            [spot],
-            bump=DELTA_BUMP,
-            seed=a.seed,
-            control_variate=a.control_variate,
-            Z=Z,
-        )
-        results.append(
-            {
-                "engine": "mc",
-                "price": float(price),
-                "delta": float(deltas[0]),
-                "gamma": float(gammas[0]),
-                "std_error": float(se),
-            }
-        )
+        steps = None
     else:
-        results.append(
-            {
-                "engine": "mc",
-                "price": None,
-                "delta": None,
-                "gamma": None,
-                "note": "Monte Carlo does not use a surface yet",
-            }
-        )
+        # Sticky-strike term structure at the barrier level, the vol that
+        # dominates a barrier option's value.  The PDE instead uses the
+        # full Dupire local-vol surface built from the same quotes.
+        steps = stepwise_sigmas_for_strike(surface, bs, bar.H, bs.T, a.steps)
+
+    # Draw the paths once and share them between the price and the delta
+    # bumps.  ``mc_risk_profile`` reuses a single simulation for all three
+    # bumps, so the expensive path generation runs once instead of four
+    # times.
+    Z = gen_normals(a.paths, a.steps, seed=a.seed)
+    price, se = price_barrier_mc(
+        bs,
+        bar,
+        n_paths=a.paths,
+        n_steps=a.steps,
+        seed=a.seed,
+        control_variate=a.control_variate,
+        Z=Z,
+        sigma=steps,
+    )
+    _, deltas, gammas = mc_risk_profile(
+        bs,
+        bar,
+        [spot],
+        bump=DELTA_BUMP,
+        seed=a.seed,
+        control_variate=a.control_variate,
+        Z=Z,
+        sigma=steps,
+    )
+    results.append(
+        {
+            "engine": "mc",
+            "price": float(price),
+            "delta": float(deltas[0]),
+            "gamma": float(gammas[0]),
+            "std_error": float(se),
+        }
+    )
 
     prices, deltas, gammas = pde_risk_profile(
         bs,
@@ -535,14 +530,13 @@ def _cmd_price(a: argparse.Namespace) -> None:
         "quotes": a.surface,
         "pde_options": dict(PDE_MESH),
         "prices": _run_engines(bs, bar, a, surface),
-    }
-    if surface is None:
-        payload["mc_options"] = {
+        "mc_options": {
             "paths": a.paths,
             "steps": a.steps,
             "seed": a.seed,
             "control_variate": a.control_variate,
-        }
+        },
+    }
 
     _emit(payload, a.json, _render_results)
 
