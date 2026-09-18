@@ -163,17 +163,26 @@ def pde_risk_profile(
     N: int = 500,
     rannacher_pairs: int = 1,
     monitor_steps: int | None = None,
+    surface=None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """PDE price/delta/gamma profile from a single surface solve.
 
     Knock-ins combine the analytic vanilla leg with the solved knock-out
     surface (plus the closed-form rebate correction), so their prices
-    agree with :func:`crossbar.price_barrier_pde`.
+    agree with :func:`crossbar.price_barrier_pde`.  An optional
+    ``surface`` is forwarded to :func:`crossbar.pde.pde_surface` for the
+    local-vol grid.
     """
     spots = np.asarray(spots, dtype=float)
     if not bar.is_in:
         S, V = pde_surface(
-            bs, bar, M=M, N=N, rannacher_pairs=rannacher_pairs, monitor_steps=monitor_steps
+            bs,
+            bar,
+            M=M,
+            N=N,
+            rannacher_pairs=rannacher_pairs,
+            monitor_steps=monitor_steps,
+            surface=surface,
         )
         return surface_risk_profile(S, V, spots)
 
@@ -183,7 +192,13 @@ def pde_risk_profile(
         )
     out_spec = replace(bar, barrier_type=bar.barrier_type.replace("in", "out"))
     S, V_out = pde_surface(
-        bs, out_spec, M=M, N=N, rannacher_pairs=rannacher_pairs, monitor_steps=monitor_steps
+        bs,
+        out_spec,
+        M=M,
+        N=N,
+        rannacher_pairs=rannacher_pairs,
+        monitor_steps=monitor_steps,
+        surface=surface,
     )
     delta_out, gamma_out = _surface_derivatives(S, V_out)
     E, F = barrier_rebate_terms(bs, bar)

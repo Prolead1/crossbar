@@ -66,10 +66,10 @@ benchmark : vanilla = 0.024153
 mc        : paths=20000, steps=50, seed=1, control_variate=True
 pde       : M=500, N=500, rannacher=1
 
-engine             price     std_error
-analytic        0.015186             -
-mc              0.014911      0.000141
-pde             0.014965             -
+engine             price         delta     std_error
+analytic        0.015186      0.193211             -
+mc              0.014911      0.182664      0.000141
+pde             0.014965      0.188408             -
 ```
 
 Press **Enter** to take the shown default. Input is validated as you go:
@@ -111,8 +111,8 @@ call/put (flat `sigma`) — is printed before the engines run, as the
 no-barrier reference. Which barrier engines run depends on the contract:
 
 * **continuous barrier, constant vol** → `analytic`, `mc` and `pde`;
-* **discrete barrier** → `mc` and `pde` (the closed form assumes
-  continuous monitoring);
+* **discrete barrier** → `mc` and `pde`, plus the continuous-monitoring
+  `analytic` value for reference;
 * **vol surface** → `analytic` (at the surface ATM vol) and `pde`; `mc`
   is skipped.
 
@@ -123,7 +123,8 @@ Skipped engines appear as `n/a` with a short reason under the table.
 Instead of a constant, `-v` can point at a JSON file of screen-style
 quotes, keyed by tenor label (`0N`, `1W`, `2W`, `1M`, `2M`, `3M`, `6M`,
 `9M`). Each tenor carries the five quote fields as `[bid, ask]` **in vol
-points**:
+points**. A complete sample lives at
+[`examples/vol_surface.json`](examples/vol_surface.json):
 
 ```json
 {
@@ -143,7 +144,7 @@ from the quotes, while the closed form is priced at the surface ATM vol
 so you still get a constant-vol reference:
 
 ```bash
-crossbar price -S 1.10 -v quotes.json -T 0.5 -r 0.04 -q 0.03 \
+crossbar price -S 1.10 -v examples/vol_surface.json -T 0.5 -r 0.04 -q 0.03 \
   -H 1.20 --type up-and-out
 ```
 
@@ -152,13 +153,13 @@ contract  : up-and-out call, continuous, K=1.1, H=1.2, rebate=0
 market    : S0=1.1, r=0.04, q=0.03, T=0.5
 vol       : 0.076000 (ATM from surface)
 benchmark : vanilla = 0.025974
-quotes    : quotes.json
+quotes    : examples/vol_surface.json
 pde       : M=500, N=500, rannacher=1
 
-engine             price     std_error
-analytic        0.014261             -
-mc                   n/a             -
-pde             0.014753             -
+engine             price         delta     std_error
+analytic        0.014261      0.143177             -
+mc                   n/a             -             -
+pde             0.014753      0.166769             -
 note: mc skipped (Monte Carlo does not use a surface yet)
 ```
 
@@ -180,18 +181,18 @@ benchmark : vanilla = 0.024153
 mc        : paths=20000, steps=50, seed=1, control_variate=True
 pde       : M=500, N=500, rannacher=1
 
-engine             price     std_error
-analytic        0.015186             -
-mc              0.014911      0.000141
-pde             0.014965             -
+engine             price         delta     std_error
+analytic        0.015186      0.193211             -
+mc              0.014911      0.182664      0.000141
+pde             0.014965      0.188408             -
 ```
 
-Prices use six decimal places, Monte Carlo estimates carry their standard
-error, and engine skips are explained below the table. `--json` emits the
-same interpretation as structured `contract`, `market`,
-`vanilla_benchmark`, `vol_source`, `mc_options`, `pde_options` and
-`prices` fields at full precision; errors go to stderr and exit with code
-`2`.
+Prices use six decimal places, deltas are spot deltas, Monte Carlo
+estimates carry their standard error, and engine skips are explained
+below the table. `--json` emits the same interpretation as structured
+`contract`, `market`, `vanilla_benchmark`, `vol_source`, `mc_options`,
+`pde_options` and `prices` fields at full precision; errors go to stderr
+and exit with code `2`.
 
 ```bash
 crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
@@ -227,10 +228,12 @@ crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
     "rannacher": 1
   },
   "prices": [
-    {"engine": "analytic", "price": 0.01518596645832257},
+    {"engine": "analytic", "price": 0.01518596645832257,
+     "delta": 0.19321143105491587},
     {"engine": "mc", "price": 0.015241443949095055,
-     "std_error": 0.00014107551621228483},
-    {"engine": "pde", "price": 0.014964531846615477}
+     "delta": 0.1972346503657604, "std_error": 0.00014107551621228483},
+    {"engine": "pde", "price": 0.014964531846615477,
+     "delta": 0.18840762863124422}
   ],
   "quotes": null,
   "vanilla_benchmark": 0.024153442087763044,

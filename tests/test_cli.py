@@ -9,6 +9,7 @@ turns into exit code 2.
 import json
 import runpy
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -110,6 +111,12 @@ def test_parser_has_no_pde_mesh_or_instrument_flags():
     }.isdisjoint(long_options)
 
 
+def test_example_surface_matches_builtin_quotes():
+    path = Path(__file__).resolve().parents[1] / "examples" / "vol_surface.json"
+    sample = json.loads(path.read_text(encoding="utf-8"))
+    assert sample == json.loads(json.dumps(EXAMPLE_QUOTES))
+
+
 def test_module_entry_point(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["crossbar", "--version"])
     with pytest.raises(SystemExit) as exc:
@@ -175,7 +182,7 @@ def test_price_barrier_table_shows_benchmark_and_engines(capsys):
     assert "benchmark : vanilla = 0.024153" in out
     assert "paths=2000, steps=20" in out
     assert "M=120, N=120, rannacher=1" in out
-    assert "engine" in out and "std_error" in out
+    assert "engine" in out and "std_error" in out and "delta" in out
     assert "analytic" in out and "mc" in out and "pde" in out
     assert "0.015186" in out  # closed-form barrier
 
@@ -195,8 +202,11 @@ def test_price_barrier_json_has_benchmark_and_three_engines(capsys):
     assert data["quotes"] is None
     analytic, mc, pde = data["prices"]
     assert analytic["price"] == pytest.approx(0.015186, abs=1e-5)
+    assert analytic["delta"] == pytest.approx(0.193211, abs=1e-5)
     assert mc["std_error"] > 0.0
+    assert mc["delta"] is not None
     assert pde["price"] > 0.0
+    assert pde["delta"] is not None
 
 
 def test_price_barrier_no_control_variate(capsys):
@@ -215,6 +225,7 @@ def test_price_with_surface_keeps_flat_vol_analytic(quotes_file, capsys):
     assert "vol       : 0.076000 (ATM from surface)" in out
     assert "benchmark : vanilla = 0.025974" in out
     assert "0.014261" in out  # flat ATM closed form is still reported
+    assert "delta" in out
     assert "note: analytic" not in out
     assert "note: mc skipped" in out
 
@@ -229,21 +240,24 @@ def test_price_with_surface_json(quotes_file, capsys):
     assert data["vanilla_benchmark"] == pytest.approx(0.0259738, abs=1e-6)
     analytic, mc, pde = data["prices"]
     assert analytic["price"] == pytest.approx(0.0142608, abs=1e-6)
-    assert mc["price"] is None and "surface" in mc["note"]
+    assert analytic["delta"] is not None
+    assert mc["price"] is None and mc["delta"] is None and "surface" in mc["note"]
     assert pde["price"] is not None
+    assert pde["delta"] is not None
     assert pde["price"] != analytic["price"]
 
 
-def test_price_discrete_skips_analytic(capsys):
+def test_price_discrete_still_shows_analytic(capsys):
     flags = ["price", *FX, *UP, "--monitor", "discrete", *MC, "--json"]
     assert main(flags, interactive=False) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["vanilla_benchmark"] is not None
     analytic, mc, pde = data["prices"]
-    assert analytic["price"] is None
-    assert "continuous" in analytic["note"]
-    assert mc["price"] is not None
-    assert pde["price"] is not None
+    assert analytic["price"] == pytest.approx(0.015186, abs=1e-5)  # continuous closed form
+    assert analytic["delta"] is not None
+    assert "note" not in analytic
+    assert mc["price"] is not None and mc["delta"] is not None
+    assert pde["price"] is not None and pde["delta"] is not None
 
 
 # --------------------------------------------------------------------------

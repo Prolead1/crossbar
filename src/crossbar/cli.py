@@ -30,13 +30,17 @@ from typing import Callable, Optional, Sequence
 
 from . import __version__
 from .analytic import price_barrier_closed_form, price_vanilla
+from .greeks import pde_risk_profile, risk_profile
 from .monte_carlo import price_barrier_mc
 from .params import BarrierSpec, BSParams, validate_inputs
-from .pde import price_barrier_pde
 from .vol_surface import VolSurface
 
 BARRIER_TYPES = ("up-and-out", "up-and-in", "down-and-out", "down-and-in")
 MONITORS = ("continuous", "discrete")
+
+#: Spot bump for the finite-difference deltas of the analytic and Monte
+#: Carlo rows (the PDE row reads its delta off the solved surface).
+DELTA_BUMP = 0.01
 
 #: PDE mesh used by the CLI (library defaults).  Not exposed as flags so
 #: the comparison across engines is reproducible; use
@@ -350,11 +354,12 @@ def _render_results(p: dict) -> None:
             print(f"{label:<9} : {body}")
 
     print()
-    print(f"{'engine':<10}{'price':>14}{'std_error':>14}")
+    print(f"{'engine':<10}{'price':>14}{'delta':>14}{'std_error':>14}")
     for row in p["prices"]:
         price = "n/a" if row["price"] is None else f"{row['price']:.6f}"
+        delta = "-" if row.get("delta") is None else f"{row['delta']:.6f}"
         se = "-" if row.get("std_error") is None else f"{row['std_error']:.6f}"
-        print(f"{row['engine']:<10}{price:>14}{se:>14}")
+        print(f"{row['engine']:<10}{price:>14}{delta:>14}{se:>14}")
     for row in p["prices"]:
         if row.get("note"):
             print(f"note: {row['engine']} skipped ({row['note']})")
@@ -377,21 +382,16 @@ def _bar_from_args(a: argparse.Namespace) -> BarrierSpec:
 
 
 def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
-    """Price with all three engines, skipping the ones that do not apply."""
+    """Price and delta with all three engines, skipping inapplicable ones."""
+    spot = float(bs.S0)
     results = []
 
-    if bar.monitor == "continuous":
-        results.append(
-            {"engine": "analytic", "price": float(price_barrier_closed_form(bs, bar))}
-        )
-    else:
-        results.append(
-            {
-                "engine": "analytic",
-                "price": None,
-                "note": "closed form assumes continuous monitoring",
-            }
-        )
+    prices, deltas, _ = risk_profile(
+        price_barrier_closed_form, bs, bar, [spot], bump=DELTA_BUMP
+    )
+    results.append(
+        {"engine": "analytic", "price": float(prices[0]), "delta": float(deltas[0])}
+    )
 
     if surface is None:
         price, se = price_barrier_mc(
@@ -402,25 +402,48 @@ def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
             seed=a.seed,
             control_variate=a.control_variate,
         )
-        results.append({"engine": "mc", "price": float(price), "std_error": float(se)})
+        _, deltas, _ = risk_profile(
+            price_barrier_mc,
+            bs,
+            bar,
+            [spot],
+            bump=DELTA_BUMP,
+            pricer_kwargs={
+                "n_paths": a.paths,
+                "n_steps": a.steps,
+                "seed": a.seed,
+                "control_variate": a.control_variate,
+            },
+        )
+        results.append(
+            {
+                "engine": "mc",
+                "price": float(price),
+                "delta": float(deltas[0]),
+                "std_error": float(se),
+            }
+        )
     else:
         results.append(
             {
                 "engine": "mc",
                 "price": None,
+                "delta": None,
                 "note": "Monte Carlo does not use a surface yet",
             }
         )
 
+    prices, deltas, _ = pde_risk_profile(
+        bs,
+        bar,
+        [spot],
+        M=a.M,
+        N=a.N,
+        rannacher_pairs=a.rannacher,
+        surface=surface,
+    )
     results.append(
-        {
-            "engine": "pde",
-            "price": float(
-                price_barrier_pde(
-                    bs, bar, M=a.M, N=a.N, rannacher_pairs=a.rannacher, surface=surface
-                )
-            ),
-        }
+        {"engine": "pde", "price": float(prices[0]), "delta": float(deltas[0])}
     )
     return results
 
