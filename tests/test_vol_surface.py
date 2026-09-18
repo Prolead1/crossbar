@@ -280,7 +280,7 @@ def test_strike_from_delta_fixed_point_iteration_is_capped(monkeypatch):
     replacing it with a strictly increasing sequence removes the fixed
     point and forces the loop to run to exhaustion rather than diverge.
     """
-    import crossbar.vol_surface as vs
+    import crossbar.vol_surface.strike as strike_mod
 
     calls = []
 
@@ -288,7 +288,7 @@ def test_strike_from_delta_fixed_point_iteration_is_capped(monkeypatch):
         calls.append(K)
         return 0.05 + 1e-3 * len(calls)
 
-    monkeypatch.setattr(vs, "sigma_for_strike", never_settles)
+    monkeypatch.setattr(strike_mod, "sigma_for_strike", never_settles)
     strike = strike_from_delta(SURFACE, FX, 0.2, 0.5)
     assert len(calls) == 50
     assert np.isfinite(strike)
