@@ -182,7 +182,7 @@ def test_price_barrier_table_shows_benchmark_and_engines(capsys):
     assert "benchmark : vanilla = 0.024153" in out
     assert "paths=2000, steps=20" in out
     assert "M=120, N=120, rannacher=1" in out
-    assert "engine" in out and "std_error" in out and "delta" in out
+    assert "engine" in out and "std_error" in out and "delta" in out and "gamma" in out
     assert "analytic" in out and "mc" in out and "pde" in out
     assert "0.015186" in out  # closed-form barrier
 
@@ -203,10 +203,13 @@ def test_price_barrier_json_has_benchmark_and_three_engines(capsys):
     analytic, mc, pde = data["prices"]
     assert analytic["price"] == pytest.approx(0.015186, abs=1e-5)
     assert analytic["delta"] == pytest.approx(0.193211, abs=1e-5)
+    assert analytic["gamma"] == pytest.approx(-3.213591, abs=1e-4)
     assert mc["std_error"] > 0.0
     assert mc["delta"] is not None
+    assert mc["gamma"] is not None
     assert pde["price"] > 0.0
     assert pde["delta"] is not None
+    assert pde["gamma"] is not None
 
 
 def test_price_barrier_no_control_variate(capsys):
@@ -242,6 +245,7 @@ def test_price_with_surface_json(quotes_file, capsys):
     assert analytic["price"] == pytest.approx(0.0142608, abs=1e-6)
     assert analytic["delta"] is not None
     assert mc["price"] is None and mc["delta"] is None and "surface" in mc["note"]
+    assert mc["gamma"] is None
     assert pde["price"] is not None
     assert pde["delta"] is not None
     assert pde["price"] != analytic["price"]
@@ -327,8 +331,40 @@ def test_interactive_barrier_runs_all_engines(monkeypatch, capsys):
     assert "K=1.15" in out
     assert "benchmark : vanilla = " in out
     assert "paths=2000, steps=20" in out
+    assert "gamma" in out
     for label in ("analytic", "mc", "pde"):
         assert label in out
+
+
+def test_interactive_prompts_show_full_choice_names(monkeypatch, capsys):
+    prompts = []
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        for key, value in BARRIER_PROMPTS.items():
+            if key in prompt:
+                return value
+        raise AssertionError(f"unexpected prompt: {prompt!r}")
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert main(["price", *MC], interactive=True) == 0
+    joined = "\n".join(prompts)
+    assert "(up-and-out/up-and-in/down-and-out/down-and-in) [uo]" in joined
+    assert "(continuous/discrete) [c]" in joined
+    assert "(call/put) [c]" in joined
+
+
+def test_interactive_accepts_full_choice_names(monkeypatch, capsys):
+    prompts = dict(BARRIER_PROMPTS)
+    prompts["Barrier type"] = "up-and-in"
+    prompts["Monitoring"] = "discrete"
+    prompts["Option type"] = "put"
+    _inputs(monkeypatch, prompts)
+    assert main(["price", *MC, "--json"], interactive=True) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["contract"]["type"] == "up-and-in"
+    assert data["contract"]["monitor"] == "discrete"
+    assert data["contract"]["call"] is False
 
 
 def test_interactive_barrier_with_surface_skips_mc(monkeypatch, quotes_file, capsys):

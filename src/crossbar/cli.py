@@ -90,17 +90,24 @@ def _prompt(
     choices: Optional[Sequence[str]] = None,
     allow_blank: bool = False,
     validate: Optional[Callable[[object], None]] = None,
+    labels: Optional[dict] = None,
 ):
     """Ask for one value and fail immediately when it is invalid.
 
     A blank answer takes ``default`` (or ``None`` when ``allow_blank``);
     ``choices`` constrains string answers and ``validate`` applies a
-    domain check.  Invalid input raises :class:`ValueError` rather than
-    re-prompting, so a mistake aborts the run.
+    domain check.  ``labels`` maps each accepted choice to the longer
+    name shown in parentheses, and either form is accepted as input.
+    Invalid input raises :class:`ValueError` rather than re-prompting, so
+    a mistake aborts the run.
     """
+
+    def _shown(choice):
+        return labels.get(choice, choice) if labels else choice
+
     hint = ""
     if choices is not None:
-        hint += " (" + "/".join(choices) + ")"
+        hint += " (" + "/".join(_shown(c) for c in choices) + ")"
     if default is not None:
         hint += f" [{default}]"
 
@@ -111,8 +118,18 @@ def _prompt(
         if default is None:
             raise ValueError(f"{label}: a value is required")
         value = default
-    elif choices is not None and raw not in choices:
-        raise ValueError(f"{label}: choose one of {', '.join(choices)}")
+    elif choices is not None:
+        if raw in choices:
+            chosen = raw
+        else:
+            matches = [c for c in choices if _shown(c) == raw]
+            if not matches:
+                raise ValueError(
+                    f"{label}: choose one of "
+                    + ", ".join(_shown(c) for c in choices)
+                )
+            chosen = matches[0]
+        value = cast(chosen)
     else:
         try:
             value = cast(raw)
@@ -213,7 +230,7 @@ def _resolve_choice(a, attr, label, default_code, codes, interactive):
     if current is not None:
         return codes.get(current, current)
     if interactive:
-        return codes[_prompt(label, default_code, str, tuple(codes))]
+        return codes[_prompt(label, default_code, str, tuple(codes), labels=codes)]
     return codes[default_code]
 
 
@@ -282,7 +299,16 @@ def _resolve(a: argparse.Namespace, interactive: bool) -> None:
 
     if a.is_call is None:
         if interactive:
-            a.is_call = _prompt("Option type", "c", str, ("c", "p")) == "c"
+            a.is_call = (
+                _prompt(
+                    "Option type",
+                    "c",
+                    str,
+                    ("c", "p"),
+                    labels={"c": "call", "p": "put"},
+                )
+                == "c"
+            )
         else:
             a.is_call = True
 
@@ -373,12 +399,17 @@ def _render_results(p: dict) -> None:
             print(f"{label:<9} : {body}")
 
     print()
-    print(f"{'engine':<10}{'price':>14}{'delta':>14}{'std_error':>14}")
+    print(
+        f"{'engine':<10}{'price':>14}{'delta':>14}{'gamma':>14}{'std_error':>14}"
+    )
     for row in p["prices"]:
         price = "n/a" if row["price"] is None else f"{row['price']:.6f}"
         delta = "-" if row.get("delta") is None else f"{row['delta']:.6f}"
+        gamma = "-" if row.get("gamma") is None else f"{row['gamma']:.6f}"
         se = "-" if row.get("std_error") is None else f"{row['std_error']:.6f}"
-        print(f"{row['engine']:<10}{price:>14}{delta:>14}{se:>14}")
+        print(
+            f"{row['engine']:<10}{price:>14}{delta:>14}{gamma:>14}{se:>14}"
+        )
     for row in p["prices"]:
         if row.get("note"):
             print(f"note: {row['engine']} skipped ({row['note']})")
@@ -401,15 +432,20 @@ def _bar_from_args(a: argparse.Namespace) -> BarrierSpec:
 
 
 def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
-    """Price and delta with all three engines, skipping inapplicable ones."""
+    """Price and greeks with all three engines, skipping inapplicable ones."""
     spot = float(bs.S0)
     results = []
 
-    prices, deltas, _ = risk_profile(
+    prices, deltas, gammas = risk_profile(
         price_barrier_closed_form, bs, bar, [spot], bump=DELTA_BUMP
     )
     results.append(
-        {"engine": "analytic", "price": float(prices[0]), "delta": float(deltas[0])}
+        {
+            "engine": "analytic",
+            "price": float(prices[0]),
+            "delta": float(deltas[0]),
+            "gamma": float(gammas[0]),
+        }
     )
 
     if surface is None:
@@ -427,7 +463,7 @@ def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
             control_variate=a.control_variate,
             Z=Z,
         )
-        _, deltas, _ = mc_risk_profile(
+        _, deltas, gammas = mc_risk_profile(
             bs,
             bar,
             [spot],
@@ -441,6 +477,7 @@ def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
                 "engine": "mc",
                 "price": float(price),
                 "delta": float(deltas[0]),
+                "gamma": float(gammas[0]),
                 "std_error": float(se),
             }
         )
@@ -450,11 +487,12 @@ def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
                 "engine": "mc",
                 "price": None,
                 "delta": None,
+                "gamma": None,
                 "note": "Monte Carlo does not use a surface yet",
             }
         )
 
-    prices, deltas, _ = pde_risk_profile(
+    prices, deltas, gammas = pde_risk_profile(
         bs,
         bar,
         [spot],
@@ -464,7 +502,12 @@ def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
         surface=surface,
     )
     results.append(
-        {"engine": "pde", "price": float(prices[0]), "delta": float(deltas[0])}
+        {
+            "engine": "pde",
+            "price": float(prices[0]),
+            "delta": float(deltas[0]),
+            "gamma": float(gammas[0]),
+        }
     )
     return results
 

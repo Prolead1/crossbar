@@ -53,12 +53,12 @@ Vol (decimal or surface JSON): 0.07
 Maturity T (years): 0.5
 Risk-free rate r [0.0]: 0.04
 Carry/dividend yield q [0.0]: 0.03
-Barrier type (uo/ui/do/di) [uo]:
-Monitoring (c/d) [c]:
+Barrier type (up-and-out/up-and-in/down-and-out/down-and-in) [uo]:
+Monitoring (continuous/discrete) [c]:
 Barrier level H: 1.20
 Rebate [0.0]:
 Strike K (blank = spot):
-Option type (c/p) [c]:
+Option type (call/put) [c]:
 contract  : up-and-out call, continuous, K=1.1, H=1.2, rebate=0
 market    : S0=1.1, r=0.04, q=0.03, T=0.5
 vol       : 0.070000 (constant)
@@ -66,10 +66,10 @@ benchmark : vanilla = 0.024153
 mc        : paths=20000, steps=50, seed=1, control_variate=True
 pde       : M=500, N=500, rannacher=1
 
-engine             price         delta     std_error
-analytic        0.015186      0.193211             -
-mc              0.014911      0.182664      0.000141
-pde             0.014965      0.188408             -
+engine             price         delta         gamma     std_error
+analytic        0.015186      0.193211     -3.213591             -
+mc              0.014911      0.182664     -0.793350      0.000141
+pde             0.014965      0.188408     -3.063749             -
 ```
 
 Press **Enter** to take the shown default. Input is validated as you go:
@@ -156,10 +156,10 @@ benchmark : vanilla = 0.025974
 quotes    : examples/vol_surface.json
 pde       : M=500, N=500, rannacher=1
 
-engine             price         delta     std_error
-analytic        0.014261      0.143177             -
-mc                   n/a             -             -
-pde             0.014753      0.166769             -
+engine             price         delta         gamma     std_error
+analytic        0.014261      0.143177     -3.434666             -
+mc                   n/a             -             -             -
+pde             0.014753      0.166769     -2.899862             -
 note: mc skipped (Monte Carlo does not use a surface yet)
 ```
 
@@ -181,15 +181,15 @@ benchmark : vanilla = 0.024153
 mc        : paths=20000, steps=50, seed=1, control_variate=True
 pde       : M=500, N=500, rannacher=1
 
-engine             price         delta     std_error
-analytic        0.015186      0.193211             -
-mc              0.014911      0.182664      0.000141
-pde             0.014965      0.188408             -
+engine             price         delta         gamma     std_error
+analytic        0.015186      0.193211     -3.213591             -
+mc              0.014911      0.182664     -0.793350      0.000141
+pde             0.014965      0.188408     -3.063749             -
 ```
 
-Prices use six decimal places, deltas are spot deltas, Monte Carlo
-estimates carry their standard error, and engine skips are explained
-below the table. `--json` emits the same interpretation as structured
+Prices use six decimal places, deltas and gammas are spot derivatives,
+Monte Carlo estimates carry their standard error, and engine skips are
+explained below the table. `--json` emits the same interpretation as structured
 `contract`, `market`, `vanilla_benchmark`, `vol_source`, `mc_options`,
 `pde_options` and `prices` fields at full precision; errors go to stderr
 and exit with code `2`.
@@ -228,12 +228,25 @@ crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
     "rannacher": 1
   },
   "prices": [
-    {"engine": "analytic", "price": 0.01518596645832257,
-     "delta": 0.19321143105491587},
-    {"engine": "mc", "price": 0.015241443949095055,
-     "delta": 0.1972346503657604, "std_error": 0.00014107551621228483},
-    {"engine": "pde", "price": 0.014964531846615477,
-     "delta": 0.18840762863124422}
+    {
+      "delta": 0.19321143105491587,
+      "engine": "analytic",
+      "gamma": -3.21359133874469,
+      "price": 0.01518596645832257
+    },
+    {
+      "delta": 0.1972346503657604,
+      "engine": "mc",
+      "gamma": -1.8364640210161327,
+      "price": 0.015241443949095055,
+      "std_error": 0.00014107551621228483
+    },
+    {
+      "delta": 0.18840762863124422,
+      "engine": "pde",
+      "gamma": -3.063748887496427,
+      "price": 0.014964531846615477
+    }
   ],
   "quotes": null,
   "vanilla_benchmark": 0.024153442087763044,
