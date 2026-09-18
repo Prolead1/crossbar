@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "crossbar"
+version = "0.1.0"
+description = "Monte Carlo and Crank-Nicolson finite-difference pricing engine for single-barrier options"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "coverage>=7.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/crossbar"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+branch = true
+source = ["src/crossbar"]
+
+[tool.coverage.report]
+show_missing = true
