@@ -15,6 +15,7 @@ import pytest
 
 from crossbar import EXAMPLE_QUOTES
 from crossbar.cli import (
+    MC_DEFAULTS,
     PDE_MESH,
     _non_negative,
     _positive,
@@ -25,10 +26,12 @@ from crossbar.cli import (
 
 
 @pytest.fixture(autouse=True)
-def _fast_pde(monkeypatch):
-    """Shrink the fixed PDE mesh so the CLI tests stay quick."""
+def _fast_engines(monkeypatch):
+    """Shrink the PDE mesh and default MC size so CLI tests stay quick."""
     monkeypatch.setitem(PDE_MESH, "M", 120)
     monkeypatch.setitem(PDE_MESH, "N", 120)
+    monkeypatch.setitem(MC_DEFAULTS, "paths", 2_000)
+    monkeypatch.setitem(MC_DEFAULTS, "steps", 20)
 
 
 @pytest.fixture

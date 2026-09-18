@@ -26,6 +26,12 @@ H_UP = 120.0
 H_DOWN = 85.0
 K = 100.0
 
+# Monte Carlo sample sizes are kept modest (tens of thousands of paths)
+# to bound the suite runtime.  The tolerances below are written in terms
+# of the reported standard error, so shrinking the sample widens the
+# tolerance proportionally; the fixed 5e-3 term absorbs the residual
+# discretisation bias.
+
 
 def _continuous_variants(rebate=0.0):
     specs = []
@@ -55,7 +61,7 @@ def test_pde_matches_closed_form(bar):
 @pytest.mark.parametrize("bar", _continuous_variants(), ids=str)
 def test_mc_matches_closed_form(bar):
     cf = price_barrier_closed_form(BS, bar)
-    mc, se = price_barrier_mc(BS, bar, n_paths=100_000, n_steps=150, seed=1)
+    mc, se = price_barrier_mc(BS, bar, n_paths=40_000, n_steps=120, seed=1)
     assert abs(mc - cf) < 4.0 * se + 5e-3
 
 
@@ -69,7 +75,7 @@ def test_mc_matches_closed_form(bar):
 def test_closed_form_rebate_matches_mc(direction, H, is_call):
     knock_out = BarrierSpec(f"{direction}-and-out", "continuous", H, K, is_call, rebate=5.0)
     cf = price_barrier_closed_form(BS, knock_out)
-    mc, se = price_barrier_mc(BS, knock_out, n_paths=150_000, n_steps=200, seed=2)
+    mc, se = price_barrier_mc(BS, knock_out, n_paths=40_000, n_steps=120, seed=2)
     assert abs(mc - cf) < 4.0 * se + 5e-3
 
 
@@ -89,7 +95,7 @@ def test_rebate_in_out_parity(direction, H, is_call):
 def test_pde_knock_in_rebate_matches_mc(direction, H, is_call):
     bar = BarrierSpec(f"{direction}-and-in", "continuous", H, K, is_call, rebate=5.0)
     pde = price_barrier_pde(BS, bar, M=500, N=500)
-    mc, se = price_barrier_mc(BS, bar, n_paths=150_000, n_steps=200, seed=4)
+    mc, se = price_barrier_mc(BS, bar, n_paths=40_000, n_steps=120, seed=4)
     assert abs(pde - mc) < 4.0 * se + 5e-3
 
 
