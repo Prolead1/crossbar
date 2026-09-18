@@ -125,6 +125,7 @@ def _operator_plan(
     dt: float,
     theta: float,
     impose_barrier: bool = True,
+    sigma=None,
 ):
     """Assemble and factor the time-invariant theta-scheme stencil.
 
@@ -148,7 +149,16 @@ def _operator_plan(
     b1 = (hp - hm) / (hm * hp)
     c1 = hm / (hp * (hm + hp))
 
-    z = 0.5 * bs.sigma**2 * S0**2
+    if sigma is None:
+        z = 0.5 * bs.sigma**2 * S0**2
+    else:
+        sig = np.asarray(sigma, dtype=float)
+        if sig.shape != S0.shape:
+            raise ValueError(
+                f"sigma must have shape {S0.shape} (one per interior node), "
+                f"got {sig.shape}"
+            )
+        z = 0.5 * sig**2 * S0**2
     a = z * a2 + (bs.r - bs.q) * S0 * a1
     b = z * b2 + (bs.r - bs.q) * S0 * b1 - bs.r
     c = z * c2 + (bs.r - bs.q) * S0 * c1
@@ -224,13 +234,14 @@ def theta_step(
     dt: float,
     tnow: float,
     theta: float,
+    sigma=None,
 ) -> np.ndarray:
     """One implicit/explicit time step of the Black-Scholes PDE.
 
     ``theta = 0.5`` is Crank-Nicolson and ``theta = 1.0`` is backward
     Euler.  ``tnow`` is the earlier time being solved for.
     """
-    plan = _operator_plan(bs, bar, S, dt, theta)
+    plan = _operator_plan(bs, bar, S, dt, theta, sigma=sigma)
     return _step(bs, bar, S, Vnext, plan, tnow)
 
 
@@ -265,6 +276,7 @@ def _knock_out_surface(
     N: int,
     rannacher_pairs: int,
     monitor_steps: int | None = None,
+    surface=None,
 ):
     """Backward-induct the PDE and return the full ``(S, V)`` surface.
 
@@ -274,6 +286,12 @@ def _knock_out_surface(
     """
     discrete = bar.monitor == "discrete"
     S, t = build_grid(bs, bar, M, N, truncate=not discrete)
+    if surface is not None:
+        from .vol_surface import build_sigma_grid
+
+        sigma_grid = build_sigma_grid(surface, bs, bar, S, t)
+    else:
+        sigma_grid = None
     V = vanilla_payoff(S, bar.K, bar.is_call)
     V = enforce_barrier_dirichlet(S, V, bar)
 
@@ -288,7 +306,11 @@ def _knock_out_surface(
     # arithmetic identical to rebuilding the stencil every step.
     plans: dict = {}
 
-    def plan_for(theta: float, dt: float):
+    def plan_for(theta: float, dt: float, sigma):
+        if sigma is not None:
+            return _operator_plan(
+                bs, bar, S, dt, theta, impose_barrier=not discrete, sigma=sigma
+            )
         key = (theta, dt)
         cached = plans.get(key)
         if cached is None:
@@ -300,14 +322,16 @@ def _knock_out_surface(
 
     for n in range(N, 0, -1):
         dt = t[n] - t[n - 1]
+        # Earlier time row: a first-order-in-time choice for a crude local vol.
+        sig = None if sigma_grid is None else sigma_grid[n - 1, 1:M]
         if (N - n) < rannacher_pairs:
             h = 0.5 * dt
-            V = _step(bs, bar, S, V, plan_for(1.0, h), tnow=t[n] - h)
+            V = _step(bs, bar, S, V, plan_for(1.0, h, sig), tnow=t[n] - h)
             if not discrete:
                 V = enforce_barrier_dirichlet(S, V, bar)
-            V = _step(bs, bar, S, V, plan_for(1.0, h), tnow=t[n] - 2.0 * h)
+            V = _step(bs, bar, S, V, plan_for(1.0, h, sig), tnow=t[n] - 2.0 * h)
         else:
-            V = _step(bs, bar, S, V, plan_for(0.5, dt), tnow=t[n] - dt)
+            V = _step(bs, bar, S, V, plan_for(0.5, dt, sig), tnow=t[n] - dt)
         if not discrete or obs[n - 1]:
             V = enforce_barrier_dirichlet(S, V, bar)
 
@@ -321,9 +345,10 @@ def pde_knock_out(
     N: int = 400,
     rannacher_pairs: int = 1,
     monitor_steps: int | None = None,
+    surface=None,
 ) -> float:
     """Price a knock-out by backward PDE induction (continuous or discrete)."""
-    S, V = _knock_out_surface(bs, bar, M, N, rannacher_pairs, monitor_steps)
+    S, V = _knock_out_surface(bs, bar, M, N, rannacher_pairs, monitor_steps, surface)
     return float(np.interp(bs.S0, S, V))
 
 
@@ -334,6 +359,7 @@ def pde_surface(
     N: int = 500,
     rannacher_pairs: int = 1,
     monitor_steps: int | None = None,
+    surface=None,
 ):
     """Barrier value surface ``(S, V)``.
 
@@ -342,14 +368,18 @@ def pde_surface(
     ``V_in = V_vanilla - V_out + E + F`` (exact for continuous monitoring).
     """
     if not bar.is_in:
-        return _knock_out_surface(bs, bar, M, N, rannacher_pairs, monitor_steps)
+        return _knock_out_surface(
+            bs, bar, M, N, rannacher_pairs, monitor_steps, surface
+        )
 
     if bar.monitor == "discrete" and bar.rebate != 0.0:
         raise NotImplementedError(
             "PDE knock-in rebates are only supported for continuous monitoring"
         )
     out_spec = replace(bar, barrier_type=bar.barrier_type.replace("in", "out"))
-    S, V_out = _knock_out_surface(bs, out_spec, M, N, rannacher_pairs, monitor_steps)
+    S, V_out = _knock_out_surface(
+        bs, out_spec, M, N, rannacher_pairs, monitor_steps, surface
+    )
     E, F = barrier_rebate_terms(bs, bar)
     V = price_vanilla(
         S, bar.K, bs.r, bs.q, bs.sigma, bs.T, bar.is_call
@@ -364,6 +394,7 @@ def price_barrier_pde(
     N: int = 500,
     rannacher_pairs: int = 1,
     monitor_steps: int | None = None,
+    surface=None,
 ) -> float:
     """Price a barrier option with the PDE solver (continuous or discrete).
 
@@ -378,6 +409,7 @@ def price_barrier_pde(
             N=N,
             rannacher_pairs=rannacher_pairs,
             monitor_steps=monitor_steps,
+            surface=surface,
         )
 
     if bar.monitor == "discrete" and bar.rebate != 0.0:
@@ -393,6 +425,7 @@ def price_barrier_pde(
         N=N,
         rannacher_pairs=rannacher_pairs,
         monitor_steps=monitor_steps,
+        surface=surface,
     )
     E, F = barrier_rebate_terms(bs, bar)
     return float(vanilla) - v_out + E + F

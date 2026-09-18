@@ -11,7 +11,10 @@ options with two independent engines:
 
 Both engines are validated against Reiner-Rubinstein / Haug closed-form
 prices, and bump-and-revalue delta and gamma profiles are provided across
-all eight single-barrier variants.
+all eight single-barrier variants.  A screen-quote volatility surface
+(:mod:`crossbar.vol_surface`) can supply a time-varying ``sigma(t)`` to
+the Monte Carlo paths and a crude local-vol ``sigma(S, t)`` grid to the
+PDE solver.
 """
 
 from .analytic import (
@@ -40,6 +43,19 @@ from .params import (
     BSParams,
     barrier_variants,
     validate_inputs,
+)
+from .vol_surface import (
+    EXAMPLE_QUOTES,
+    VolSmile,
+    VolSurface,
+    build_sigma_grid,
+    mid_vol,
+    plot_vol_surface,
+    sigma_for_strike,
+    stepwise_sigmas_from_surface,
+    strike_from_delta,
+    tenor_to_years,
+    total_variance_grid,
 )
 from .pde import (
     build_grid,
@@ -76,4 +92,15 @@ __all__ = [
     "surface_risk_profile",
     "pde_risk_profile",
     "greeks_by_variant_pde",
+    "VolSmile",
+    "VolSurface",
+    "tenor_to_years",
+    "mid_vol",
+    "strike_from_delta",
+    "sigma_for_strike",
+    "stepwise_sigmas_from_surface",
+    "build_sigma_grid",
+    "total_variance_grid",
+    "plot_vol_surface",
+    "EXAMPLE_QUOTES",
 ]

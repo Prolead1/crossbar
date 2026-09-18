@@ -59,16 +59,32 @@ def gen_normals(
     return Z
 
 
-def monte_carlo_paths(bs: BSParams, Z: np.ndarray) -> np.ndarray:
+def monte_carlo_paths(bs: BSParams, Z: np.ndarray, sigma=None) -> np.ndarray:
     """Simulate GBM paths under the risk-neutral measure.
 
     Returns an ``(n_paths, n_steps + 1)`` array whose first column is
-    ``bs.S0``.
+    ``bs.S0``.  ``sigma`` may be ``None`` (fall back to the flat
+    ``bs.sigma``), a scalar, or a length-``n_steps`` sequence of
+    instantaneous vols -- for instance the output of
+    :func:`crossbar.vol_surface.stepwise_sigmas_from_surface` -- so the
+    paths can follow a market-implied term structure.
     """
     n_paths, n_steps = Z.shape
     dt = bs.T / n_steps
-    drift = (bs.r - bs.q - 0.5 * bs.sigma**2) * dt
-    vol = bs.sigma * np.sqrt(dt)
+
+    if sigma is None:
+        sig = np.full(n_steps, float(bs.sigma))
+    else:
+        sig = np.asarray(sigma, dtype=float)
+        if sig.ndim == 0:
+            sig = np.full(n_steps, float(sig))
+        elif sig.shape != (n_steps,):
+            raise ValueError(
+                f"sigma must be scalar or have shape ({n_steps},), got {sig.shape}"
+            )
+
+    drift = (bs.r - bs.q - 0.5 * sig**2) * dt
+    vol = sig * np.sqrt(dt)
 
     # Build the log-price increments in place to avoid several
     # full-size ``(n_paths, n_steps)`` temporaries.
