@@ -13,13 +13,16 @@ from crossbar import (
     BarrierSpec,
     BSParams,
     barrier_variants,
+    gen_normals,
     pde_surface,
     price_barrier_closed_form,
+    price_barrier_mc,
     price_barrier_pde,
 )
 from crossbar.greeks import (
     greeks_by_variant,
     greeks_by_variant_pde,
+    mc_risk_profile,
     pde_risk_profile,
     risk_profile,
     surface_risk_profile,
@@ -154,6 +157,45 @@ def test_greeks_by_variant_forwards_variant_kwargs():
             assert price == pytest.approx(
                 price_barrier_closed_form(bs, spec), abs=1e-10
             )
+
+
+# --------------------------------------------------------------------------
+# mc_risk_profile
+# --------------------------------------------------------------------------
+
+
+def test_mc_risk_profile_matches_bump_and_revalue_with_common_paths():
+    # Reusing one simulation must reproduce the generic bump-and-revalue
+    # profile with the same seed exactly (same common random numbers).
+    kwargs = {
+        "n_paths": 2_000,
+        "n_steps": 20,
+        "seed": 5,
+        "control_variate": True,
+    }
+    expected = risk_profile(
+        price_barrier_mc, BS, BAR, SPOTS, bump=0.5, pricer_kwargs=kwargs
+    )
+    got = mc_risk_profile(BS, BAR, SPOTS, bump=0.5, **kwargs)
+    for a, b in zip(expected, got):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_mc_risk_profile_accepts_pre_drawn_normals():
+    Z = gen_normals(2_000, 20, seed=5)
+    shared = mc_risk_profile(BS, BAR, SPOTS, bump=0.5, seed=5, Z=Z)
+    drawn = mc_risk_profile(BS, BAR, SPOTS, bump=0.5, n_paths=2_000, n_steps=20, seed=5)
+    for a, b in zip(shared, drawn):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_mc_risk_profile_without_control_variate():
+    prices, deltas, gammas = mc_risk_profile(
+        BS, BAR, SPOTS, bump=0.5, n_paths=2_000, n_steps=20, control_variate=False
+    )
+    for arr in (prices, deltas, gammas):
+        assert arr.shape == SPOTS.shape
+        assert np.all(np.isfinite(arr))
 
 
 # --------------------------------------------------------------------------

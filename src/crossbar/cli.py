@@ -30,8 +30,8 @@ from typing import Callable, Optional, Sequence
 
 from . import __version__
 from .analytic import price_barrier_closed_form, price_vanilla
-from .greeks import pde_risk_profile, risk_profile
-from .monte_carlo import price_barrier_mc
+from .greeks import mc_risk_profile, pde_risk_profile, risk_profile
+from .monte_carlo import gen_normals, price_barrier_mc
 from .params import BarrierSpec, BSParams, validate_inputs
 from .vol_surface import VolSurface
 
@@ -413,6 +413,11 @@ def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
     )
 
     if surface is None:
+        # Draw the paths once and share them between the price and the
+        # delta bumps.  ``mc_risk_profile`` reuses a single simulation for
+        # all three bumps, so the expensive path generation runs once
+        # instead of four times.
+        Z = gen_normals(a.paths, a.steps, seed=a.seed)
         price, se = price_barrier_mc(
             bs,
             bar,
@@ -420,19 +425,16 @@ def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
             n_steps=a.steps,
             seed=a.seed,
             control_variate=a.control_variate,
+            Z=Z,
         )
-        _, deltas, _ = risk_profile(
-            price_barrier_mc,
+        _, deltas, _ = mc_risk_profile(
             bs,
             bar,
             [spot],
             bump=DELTA_BUMP,
-            pricer_kwargs={
-                "n_paths": a.paths,
-                "n_steps": a.steps,
-                "seed": a.seed,
-                "control_variate": a.control_variate,
-            },
+            seed=a.seed,
+            control_variate=a.control_variate,
+            Z=Z,
         )
         results.append(
             {
