@@ -1,6 +1,7 @@
 # crossbar
 
-Single-barrier option pricing engine with two independent engines:
+Single-barrier option pricing engine with two independent numerical
+engines alongside the closed form:
 
 * **Monte Carlo** — Latin-hypercube stratification, antithetic variates,
   moment matching, a Black-Scholes control variate and a Brownian-bridge
@@ -8,11 +9,10 @@ Single-barrier option pricing engine with two independent engines:
 * **Crank-Nicolson PDE** — Rannacher time stepping on a non-uniform grid,
   with the barrier snapped to a node.
 
-Both engines are validated against Reiner-Rubinstein / Haug closed-form
+The engines are validated against Reiner-Rubinstein / Haug closed-form
 prices, and delta/gamma profiles are provided across all eight
-single-barrier variants. A screen-quote volatility surface can supply a
-time-varying ``sigma(t)`` to the Monte Carlo paths and a crude local-vol
-``sigma(S, t)`` grid to the PDE solver.
+single-barrier variants. A screen-quote volatility surface can be fed to
+the PDE solver as a first-order local-volatility grid.
 
 ## Install
 
@@ -23,7 +23,7 @@ git clone https://github.com/Prolead1/crossbar.git
 cd crossbar
 uv venv
 uv pip install -e ".[dev]"        # tests + coverage
-uv pip install -e ".[dev,plot]"   # ... plus matplotlib for `crossbar plot`
+uv pip install -e ".[dev,plot]"   # ... plus matplotlib for the surface helpers
 ```
 
 Or with plain `pip`:
@@ -42,133 +42,88 @@ python -m crossbar --help   # same CLI, no console script required
 
 ## Quick start
 
-The CLI is a thin, scriptable front end over the public functions:
-
-| Command | What it does |
-|---------|--------------|
-| `price` | price a vanilla (omit `-H`) or a single-barrier option |
-| `variants` | price all eight single-barrier variants at once |
-| `greeks` | price/delta/gamma profile across a spot grid |
-| `surface` | inspect the delta-quoted volatility surface |
-| `plot` | render the volatility surface to an image |
-
-Every command accepts `--json` for machine-readable output; run
-`crossbar <command> --help` for the full option list.
-
-All market conventions used throughout:
-
-| Symbol | Meaning | Units |
-|--------|---------|-------|
-| `S` / `S0` | spot price | price |
-| `K` | strike | price |
-| `H` | barrier level | price |
-| `r` | risk-free rate | continuously compounded, decimal |
-| `q` | dividend / carry yield | continuously compounded, decimal |
-| `v` / `sigma` | volatility | decimal (`0.07` = 7 vol points) |
-| `T` | time to maturity | years |
-
-Deltas are **unadjusted spot** deltas (negative for puts), and the
-closed-form engine assumes **continuous** monitoring.
-
-### Price a vanilla option
-
-`price` without a barrier prices a European option with Black-Scholes:
+`crossbar price` is the only command. Run it bare and it walks through
+the trade one question at a time, then prices the barrier with **all
+three engines**, printing a vanilla benchmark and an aligned comparison:
 
 ```bash
-crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 -K 1.10
-# vanilla call: strike=1.1 price=0.024153
+$ crossbar price --paths 20000 --steps 50 --seed 1
+Spot S0: 1.10
+Vol (decimal or surface JSON): 0.07
+Maturity T (years): 0.5
+Risk-free rate r [0.0]: 0.04
+Carry/dividend yield q [0.0]: 0.03
+Barrier type (up-and-out/up-and-in/down-and-out/down-and-in) [up-and-out]:
+Monitoring (continuous/discrete) [continuous]:
+Barrier level H: 1.20
+Rebate [0.0]:
+Strike K (blank = spot):
+Option type (call/put) [call]:
+contract  : up-and-out call, continuous, K=1.1, H=1.2, rebate=0
+market    : S0=1.1, r=0.04, q=0.03, T=0.5
+vol       : 0.070000 (constant)
+benchmark : vanilla = 0.024153
+mc        : paths=20000, steps=50, seed=1, control_variate=True
+pde       : M=500, N=500, rannacher=1
 
-crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 -K 1.10 --put
-# vanilla put: strike=1.1 price=0.018749
+engine             price     std_error
+analytic        0.015186             -
+mc              0.014911      0.000141
+pde             0.014965             -
 ```
 
-Omit `-K` to use the spot as the strike (ATM).
+Press **Enter** to take the shown default. Input is validated as you go:
+an unparseable number, an unknown choice, a missing required value or a
+domain violation (e.g. `S0 = 0`) aborts immediately with
+`crossbar: error: ...` and exit code `2` instead of re-prompting.
 
-### Price a single-barrier option
+The **PDE mesh** (`M`, `N`, Rannacher pairs) is fixed at the library
+defaults and shown in the output, but is deliberately *not* a CLI input.
+Call `price_barrier_pde(..., M=..., N=..., rannacher_pairs=...)` from
+Python for a custom mesh.
 
-Add `-H` and a `--type`; the four variants are `up-and-out`,
-`up-and-in`, `down-and-out` and `down-and-in`. The engine is selected
-with `--engine` (`pde` by default):
+### Non-interactive
+
+Supply the matching options to skip the prompts entirely — useful for
+scripts and reproducible runs. `price` always prices a barrier; the
+Monte Carlo controls are flags only (they are never prompted):
 
 ```bash
-# Crank-Nicolson PDE (default)
 crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
-  -H 1.20 --type up-and-out
-
-# Reiner-Rubinstein / Haug closed form (continuous monitoring only)
-crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
-  -H 1.20 --type up-and-out --engine analytic
-# price (analytic) = 0.015186
-
-# Monte Carlo with control variate
-crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
-  -H 1.20 --type up-and-out --engine mc --paths 200000 --steps 252 --seed 1
+  -H 1.20 --type up-and-out --paths 20000 --steps 50 --seed 1
 ```
 
-Useful options:
+| Option | Meaning |
+|--------|---------|
+| `-S` | spot price |
+| `-v` | volatility: a decimal constant **or** a path to a surface JSON (exactly one) |
+| `-T` | time to maturity in years |
+| `-r`, `-q` | risk-free rate, dividend/carry yield (default 0) |
+| `-H`, `--type`, `--monitor`, `--rebate` | barrier level, one of the four types, `continuous`/`discrete`, cash rebate |
+| `-K` | strike (default: spot) |
+| `--call` / `--put` | option type (default call) |
+| `--paths`, `--steps`, `--seed`, `--no-control-variate` | Monte Carlo controls |
+| `--non-interactive` | never prompt; error on missing required options |
+| `--json` | machine-readable output |
 
-* `--put` prices a put instead of the default call.
-* `--monitor discrete` observes the barrier on the time grid only.
-* `--rebate 0.02` adds a cash rebate (paid at the first hit for a
-  knock-out, at maturity for a knock-in).
-* `--M`/`--N` tune the PDE mesh (default 500×500); `--paths`/`--steps`
-  tune the Monte Carlo size.
-* `--no-control-variate` disables the Black-Scholes control variate.
+A `vanilla` benchmark — the closed-form European for the same strike and
+call/put (flat `sigma`) — is printed before the engines run, as the
+no-barrier reference. Which barrier engines run depends on the contract:
 
-> The `analytic` engine only supports continuous monitoring; combining
-> it with `--monitor discrete` exits with an error.
+* **continuous barrier, constant vol** → `analytic`, `mc` and `pde`;
+* **discrete barrier** → `mc` and `pde` (the closed form assumes
+  continuous monitoring);
+* **vol surface** → `analytic` (at the surface ATM vol) and `pde`; `mc`
+  is skipped.
 
-### Price all eight variants at once
+Skipped engines appear as `n/a` with a short reason under the table.
 
-`variants` sweeps up/down × in/out × call/put around the spot, with
-barriers defaulting to `1.1 * S0` and `0.9 * S0`:
+### Volatility surface
 
-```bash
-crossbar variants -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 --M 300 --N 300
-```
-
-```
-variant                        price
-up-and-in call              0.012589
-up-and-in put               0.002256
-up-and-out call             0.011564
-up-and-out put              0.016493
-down-and-in call            0.000182
-down-and-in put             0.004950
-down-and-out call           0.023971
-down-and-out put            0.013799
-```
-
-Override `--up-barrier`, `--down-barrier`, `-K` and `--rebate` as
-needed, and reuse `--engine` just like `price`.
-
-### Delta and gamma profiles
-
-`greeks` returns price, delta and gamma across a spot grid. The PDE
-engine solves the value surface once and reads the derivatives off it;
-the Monte Carlo engine bumps and revalues:
-
-```bash
-crossbar greeks -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
-  -H 1.20 --engine pde --M 300 --N 300 --spots 1.05,1.10,1.15
-```
-
-```
-      spot         price         delta         gamma
-    1.0500      0.004742      0.143369      2.742968
-    1.1000      0.014421      0.184933     -2.693399
-    1.1500      0.016522     -0.157404     -8.929600
-```
-
-Omit `--spots` for five points around the spot. For `--engine mc`, pass
-a fixed `--seed` and a `--bump` so the finite differences share random
-numbers and are not swamped by simulation noise.
-
-### Work with a volatility surface
-
-A surface is a JSON file of screen-style quotes, keyed by tenor label
-(`0N`, `1W`, `2W`, `1M`, `2M`, `3M`, `6M`, `9M`). Each tenor carries the
-five quote fields as `[bid, ask]` **in vol points**:
+Instead of a constant, `-v` can point at a JSON file of screen-style
+quotes, keyed by tenor label (`0N`, `1W`, `2W`, `1M`, `2M`, `3M`, `6M`,
+`9M`). Each tenor carries the five quote fields as `[bid, ask]` **in vol
+points**:
 
 ```json
 {
@@ -183,77 +138,111 @@ five quote fields as `[bid, ask]` **in vol points**:
 }
 ```
 
-Inspect the reconstructed term structure (uses the built-in EURUSD
-example when `--quotes` is omitted):
+The PDE engine then uses a `sigma(S, t)` local-volatility grid built
+from the quotes, while the closed form is priced at the surface ATM vol
+so you still get a constant-vol reference:
 
 ```bash
-crossbar surface --quotes quotes.json
-#        T       10p       25p       atm       25c       10c
-#   0.0027   0.06875   0.06375   0.06000   0.06025   0.06025
-#   0.0192   0.07020   0.06495   0.06100   0.06145   0.06120
-#   ...
+crossbar price -S 1.10 -v quotes.json -T 0.5 -r 0.04 -q 0.03 \
+  -H 1.20 --type up-and-out
 ```
 
-Look up a vol from a strike, or a strike from a delta:
+```
+contract  : up-and-out call, continuous, K=1.1, H=1.2, rebate=0
+market    : S0=1.1, r=0.04, q=0.03, T=0.5
+vol       : 0.076000 (ATM from surface)
+benchmark : vanilla = 0.025974
+quotes    : quotes.json
+pde       : M=500, N=500, rannacher=1
 
-```bash
-crossbar surface -S 1.10 --strike 1.10 --maturity 0.5
-# sigma(K=1.1, T=0.5) = 0.076207
-
-crossbar surface -S 1.10 --delta 0.25 --maturity 0.5
-# strike(delta=+0.250, T=0.5) = 1.144168
+engine             price     std_error
+analytic        0.014261             -
+mc                   n/a             -
+pde             0.014753             -
+note: mc skipped (Monte Carlo does not use a surface yet)
 ```
 
-Feed the surface to the PDE engine as a crude local-volatility grid:
+> This is a first-order "implied-vol-as-local-vol" approximation, not a
+> calibrated Dupire local-vol model, and it currently drives the PDE
+> diffusion only. Monte Carlo is therefore reported as `n/a`; the closed
+> form uses the surface ATM vol as a constant-vol reference.
 
-```bash
-crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
-  -H 1.20 --type up-and-out --engine pde --surface quotes.json
+### Output and scripting
+
+Human-readable results begin with a self-describing context block, so the
+interpreted inputs, engine options and method are always visible:
+
+```
+contract  : up-and-out call, continuous, K=1.1, H=1.2, rebate=0
+market    : S0=1.1, r=0.04, q=0.03, T=0.5
+vol       : 0.070000 (constant)
+benchmark : vanilla = 0.024153
+mc        : paths=20000, steps=50, seed=1, control_variate=True
+pde       : M=500, N=500, rannacher=1
+
+engine             price     std_error
+analytic        0.015186             -
+mc              0.014911      0.000141
+pde             0.014965             -
 ```
 
-Render it (requires the `plot` extra):
-
-```bash
-crossbar plot -S 1.10 --quotes quotes.json --out vol.png \
-  --strikes 61 --maturities 41 --dpi 150
-```
-
-### Scripting with `--json`
-
-Every command accepts `--json`; errors go to stderr and exit with code
+Prices use six decimal places, Monte Carlo estimates carry their standard
+error, and engine skips are explained below the table. `--json` emits the
+same interpretation as structured `contract`, `market`,
+`vanilla_benchmark`, `vol_source`, `mc_options`, `pde_options` and
+`prices` fields at full precision; errors go to stderr and exit with code
 `2`.
 
 ```bash
 crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
-  -H 1.20 --type up-and-out --engine pde --M 300 --N 300 --json
+  -H 1.20 --type up-and-out --paths 20000 --steps 50 --json
 ```
 
 ```json
 {
-  "engine": "pde",
-  "instrument": "barrier",
-  "price": 0.014421308033271484,
-  "surface": null
+  "contract": {
+    "barrier": 1.2,
+    "call": true,
+    "monitor": "continuous",
+    "rebate": 0.0,
+    "strike": 1.1,
+    "type": "up-and-out"
+  },
+  "market": {
+    "carry": 0.03,
+    "maturity": 0.5,
+    "rate": 0.04,
+    "spot": 1.1,
+    "vol": 0.07
+  },
+  "mc_options": {
+    "control_variate": true,
+    "paths": 20000,
+    "seed": 0,
+    "steps": 50
+  },
+  "pde_options": {
+    "M": 500,
+    "N": 500,
+    "rannacher": 1
+  },
+  "prices": [
+    {"engine": "analytic", "price": 0.01518596645832257},
+    {"engine": "mc", "price": 0.015241443949095055,
+     "std_error": 0.00014107551621228483},
+    {"engine": "pde", "price": 0.014964531846615477}
+  ],
+  "quotes": null,
+  "vanilla_benchmark": 0.024153442087763044,
+  "vol_source": "constant"
 }
 ```
 
-```bash
-crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 -K 1.10 --json
-```
+## Python API
 
-```json
-{
-  "instrument": "vanilla",
-  "is_call": true,
-  "price": 0.024153442087763044,
-  "strike": 1.1
-}
-```
-
-### Python API
-
-The CLI is a thin wrapper over the same functions. Build the market and
-contract objects once and reuse them:
+The CLI exposes only `price`; the rest of the library — including custom
+PDE meshes and the risk-profile helpers — is available from Python. Build
+the market and contract objects once and reuse them:
 
 ```python
 from crossbar import BSParams, BarrierSpec
@@ -274,6 +263,7 @@ from crossbar import (
 price_barrier_closed_form(bs, bar)                               # 0.015186
 price_barrier_mc(bs, bar, n_paths=100_000, n_steps=252, seed=1)  # (0.015256, 6.27e-05)
 price_barrier_pde(bs, bar, M=300, N=300)                         # 0.014421
+price_barrier_pde(bs, bar, M=500, N=500, rannacher_pairs=2)      # custom mesh
 ```
 
 **Risk profiles** — one surface solve for the whole spot grid, or all
@@ -315,7 +305,7 @@ paths = monte_carlo_paths(bs, Z, sigma=steps)       # shape (10000, 65)
 price_barrier_pde(bs, bar, M=200, N=200, surface=surface)   # 0.012969
 ```
 
-### Run the tests
+## Run the tests
 
 ```bash
 pytest                                        # full suite
@@ -324,6 +314,6 @@ coverage run -m pytest && coverage report -m  # with 100% coverage
 
 ## Where next
 
-* `crossbar <command> --help` — full option list for any subcommand.
+* `crossbar price --help` — full option list.
 * `src/crossbar/` — `params.py` (inputs), `analytic.py` (closed form),
   `monte_carlo.py`, `pde.py`, `greeks.py`, `vol_surface.py`, `cli.py`.
