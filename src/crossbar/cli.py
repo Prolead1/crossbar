@@ -9,7 +9,7 @@ Examples
 --------
 ::
 
-    crossbar vanilla  -S 1.10 -v 0.07 -T 0.5 -K 1.10
+    crossbar price    -S 1.10 -v 0.07 -T 0.5 -K 1.10
     crossbar price    -S 1.10 -v 0.07 -T 0.5 -H 1.20 --type up-and-out
     crossbar variants -S 1.10 -v 0.07 -T 0.5 --engine pde
     crossbar greeks   -S 1.10 -v 0.07 -T 0.5 -H 1.20 --engine pde
@@ -94,8 +94,17 @@ def _add_call_put(p: argparse.ArgumentParser) -> None:
     p.set_defaults(is_call=True)
 
 
-def _add_barrier_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("-H", "--barrier", type=float, required=True, help="barrier level")
+def _add_barrier_args(
+    p: argparse.ArgumentParser, *, require_barrier: bool = True
+) -> None:
+    p.add_argument(
+        "-H",
+        "--barrier",
+        type=float,
+        required=require_barrier,
+        default=None,
+        help="barrier level (omit to price a vanilla European)",
+    )
     p.add_argument(
         "-K", "--strike", type=float, default=None, help="strike (default: spot)"
     )
@@ -222,43 +231,59 @@ def _mc_kwargs(a: argparse.Namespace) -> dict:
 # --------------------------------------------------------------------------
 
 
-def _cmd_vanilla(a: argparse.Namespace) -> None:
-    strike = a.spot if a.strike is None else a.strike
-    price = float(
-        price_vanilla(
-            a.spot, strike, a.rate, a.div, a.vol, a.maturity, is_call=a.is_call
-        )
-    )
-    payload = {"price": price, "is_call": a.is_call, "strike": strike}
-
-    def render(p: dict) -> None:
-        kind = "call" if p["is_call"] else "put"
-        print(f"vanilla {kind}: strike={p['strike']:.6g} price={p['price']:.6f}")
-
-    _emit(payload, a.json, render)
-
-
 def _cmd_price(a: argparse.Namespace) -> None:
-    bs = _bs_from_args(a)
-    bar = _bar_from_args(a)
-    validate_inputs(bs, bar)
-
-    if a.engine == "analytic":
-        if bar.monitor != "continuous":
-            raise ValueError("the analytic engine only supports continuous monitoring")
-        payload = {"engine": "analytic", "price": price_barrier_closed_form(bs, bar)}
-    elif a.engine == "mc":
-        price, se = price_barrier_mc(bs, bar, **_mc_kwargs(a))
-        payload = {"engine": "mc", "price": price, "std_error": se}
+    if a.barrier is None:
+        strike = a.spot if a.strike is None else a.strike
+        payload = {
+            "instrument": "vanilla",
+            "price": float(
+                price_vanilla(
+                    a.spot, strike, a.rate, a.div, a.vol, a.maturity, is_call=a.is_call
+                )
+            ),
+            "is_call": a.is_call,
+            "strike": strike,
+        }
     else:
-        surface = _load_surface(a.surface)
-        price = price_barrier_pde(
-            bs, bar, M=a.M, N=a.N, rannacher_pairs=a.rannacher, surface=surface
-        )
-        payload = {"engine": "pde", "price": price, "surface": a.surface}
+        bs = _bs_from_args(a)
+        bar = _bar_from_args(a)
+        validate_inputs(bs, bar)
+
+        if a.engine == "analytic":
+            if bar.monitor != "continuous":
+                raise ValueError(
+                    "the analytic engine only supports continuous monitoring"
+                )
+            payload = {
+                "instrument": "barrier",
+                "engine": "analytic",
+                "price": price_barrier_closed_form(bs, bar),
+            }
+        elif a.engine == "mc":
+            price, se = price_barrier_mc(bs, bar, **_mc_kwargs(a))
+            payload = {
+                "instrument": "barrier",
+                "engine": "mc",
+                "price": price,
+                "std_error": se,
+            }
+        else:
+            surface = _load_surface(a.surface)
+            price = price_barrier_pde(
+                bs, bar, M=a.M, N=a.N, rannacher_pairs=a.rannacher, surface=surface
+            )
+            payload = {
+                "instrument": "barrier",
+                "engine": "pde",
+                "price": price,
+                "surface": a.surface,
+            }
 
     def render(p: dict) -> None:
-        if p["engine"] == "mc":
+        if p["instrument"] == "vanilla":
+            kind = "call" if p["is_call"] else "put"
+            print(f"vanilla {kind}: strike={p['strike']:.6g} price={p['price']:.6f}")
+        elif p["engine"] == "mc":
             print(f"price (mc)  = {p['price']:.6f} +/- {p['std_error']:.6f}")
         else:
             print(f"price ({p['engine']}) = {p['price']:.6f}")
@@ -441,16 +466,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("vanilla", help="price a European vanilla with Black-Scholes")
+    p = sub.add_parser(
+        "price", help="price a European vanilla or a single-barrier option"
+    )
     _add_market_args(p)
-    p.add_argument("-K", "--strike", type=float, default=None, help="strike (default: spot)")
-    _add_call_put(p)
-    _add_json(p)
-    p.set_defaults(func=_cmd_vanilla)
-
-    p = sub.add_parser("price", help="price a single-barrier option")
-    _add_market_args(p)
-    _add_barrier_args(p)
+    _add_barrier_args(p, require_barrier=False)
     _add_engine_arg(p)
     _add_mc_args(p)
     _add_pde_args(p)

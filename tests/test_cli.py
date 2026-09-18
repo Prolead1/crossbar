@@ -52,7 +52,6 @@ def test_build_parser_has_all_subcommands():
     parser = build_parser()
     actions = [a for a in parser._actions if a.dest == "command"]
     assert actions and set(actions[0].choices) == {
-        "vanilla",
         "price",
         "variants",
         "greeks",
@@ -70,27 +69,28 @@ def test_module_entry_point(monkeypatch, capsys):
 
 
 # --------------------------------------------------------------------------
-# vanilla
+# price (vanilla when no barrier is given)
 # --------------------------------------------------------------------------
 
 
-def test_vanilla_table_put_and_default_strike(capsys):
-    assert main(["vanilla", *FX, "--put", "-K", "1.20"]) == 0
+def test_price_vanilla_table_put(capsys):
+    assert main(["price", *FX, "--put", "-K", "1.20"]) == 0
     out = capsys.readouterr().out
     assert "vanilla put" in out
     assert "strike=1.2" in out
 
 
-def test_vanilla_json_uses_spot_as_default_strike(capsys):
-    assert main(["vanilla", *FX, "--json"]) == 0
+def test_price_vanilla_json_uses_spot_as_default_strike(capsys):
+    assert main(["price", *FX, "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
+    assert data["instrument"] == "vanilla"
     assert data["is_call"] is True
     assert data["strike"] == pytest.approx(1.10)
     assert data["price"] > 0.0
 
 
 # --------------------------------------------------------------------------
-# price
+# price (barrier)
 # --------------------------------------------------------------------------
 
 
