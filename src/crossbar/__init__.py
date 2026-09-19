@@ -25,6 +25,7 @@ from .analytic import (
 from .greeks import (
     greeks_by_variant,
     greeks_by_variant_pde,
+    mc_greek_bumps,
     mc_risk_profile,
     pde_risk_profile,
     risk_profile,
@@ -99,6 +100,7 @@ __all__ = [
     "price_barrier_pde",
     "risk_profile",
     "mc_risk_profile",
+    "mc_greek_bumps",
     "greeks_by_variant",
     "surface_risk_profile",
     "pde_risk_profile",

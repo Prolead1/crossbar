@@ -185,7 +185,8 @@ def test_price_barrier_table_shows_benchmark_and_engines(capsys):
     assert "benchmark : vanilla = 0.024153" in out
     assert "paths=2000, steps=20" in out
     assert "M=120, N=120, rannacher=1" in out
-    assert "engine" in out and "std_error" in out and "delta" in out and "gamma" in out
+    assert "engine" in out and "price" in out and "delta" in out and "gamma" in out
+    assert "±" in out  # per-component MC standard errors are inline
     assert "analytic" in out and "mc" in out and "pde" in out
     assert "0.015186" in out  # closed-form barrier
 

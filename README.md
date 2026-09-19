@@ -67,10 +67,10 @@ benchmark : vanilla = 0.024153
 mc        : paths=20000, steps=50, seed=1, control_variate=True
 pde       : M=500, N=500, rannacher=1
 
-engine             price         delta         gamma     std_error
-analytic        0.015186      0.193211     -3.213591             -
-mc              0.014911      0.182664     -0.793350      0.000141
-pde             0.014965      0.188408     -3.063749             -
+engine             price                   delta                   gamma
+analytic        0.015186                0.193211               -3.213591
+mc              0.014911 ±0.000141      0.190301 ±0.009480     -0.320286 ±1.248213
+pde             0.014965                0.188408               -3.063749
 ```
 
 Press **Enter** to take the shown default. Input is validated as you go:
@@ -166,10 +166,10 @@ quotes    : examples/vol_surface.json
 mc        : paths=200000, steps=252, seed=0, control_variate=True
 pde       : M=500, N=500, rannacher=1
 
-engine             price         delta         gamma     std_error
-analytic        0.014261      0.143177     -3.434666             -
-mc              0.013490      0.116166     -2.705588      0.000046
-pde             0.012348      0.098171     -2.801006             -
+engine             price                   delta                   gamma
+analytic        0.014261                0.143177               -3.434666
+mc              0.013490 ±0.000046      0.116107 ±0.002936     -2.855630 ±0.359078
+pde             0.012348                0.098171               -2.801006
 ```
 
 > The engines use different (all standard) surface models, so their
@@ -193,14 +193,16 @@ benchmark : vanilla = 0.024153
 mc        : paths=20000, steps=50, seed=1, control_variate=True
 pde       : M=500, N=500, rannacher=1
 
-engine             price         delta         gamma     std_error
-analytic        0.015186      0.193211     -3.213591             -
-mc              0.014911      0.182664     -0.793350      0.000141
-pde             0.014965      0.188408     -3.063749             -
+engine             price                   delta                   gamma
+analytic        0.015186                0.193211               -3.213591
+mc              0.014911 ±0.000141      0.190301 ±0.009480     -0.320286 ±1.248213
+pde             0.014965                0.188408               -3.063749
 ```
 
 Prices use six decimal places, deltas and gammas are spot derivatives,
-Monte Carlo estimates carry their standard error, and engine skips are
+and each Monte Carlo estimate carries its own standard error inline as
+`value ±error` -- the gamma is a second finite difference of a
+discontinuous barrier payoff, so read it next to its error. Engine skips are
 explained below the table. `--json` emits the same interpretation as structured
 `contract`, `market`, `vanilla_benchmark`, `vol_source`, `mc_options`,
 `pde_options` and `prices` fields at full precision; errors go to stderr
@@ -247,11 +249,13 @@ crossbar price -S 1.10 -v 0.07 -T 0.5 -r 0.04 -q 0.03 \
       "price": 0.01518596645832257
     },
     {
-      "delta": 0.1972346503657604,
+      "delta": 0.19083230723981828,
+      "delta_std_error": 0.0095506123367582,
       "engine": "mc",
-      "gamma": -1.8364640210161327,
-      "price": 0.015241443949095055,
-      "std_error": 0.00014107551621228483
+      "gamma": -2.846903011384109,
+      "gamma_std_error": 1.2391346408934023,
+      "price": 0.015241443949095056,
+      "std_error": 0.0001410755162122848
     },
     {
       "delta": 0.18840762863124422,
@@ -301,6 +305,7 @@ eight variants at once:
 import numpy as np
 from crossbar import (
     greeks_by_variant_pde,
+    mc_greek_bumps,
     mc_risk_profile,
     pde_risk_profile,
 )
@@ -310,9 +315,13 @@ prices, deltas, gammas = pde_risk_profile(bs, bar, spots, M=300, N=300)
 
 profiles = greeks_by_variant_pde(bs, spots, M=200, N=200)  # dict of 8 labels
 
-# Monte Carlo Greeks: one simulation, reused across every spot and bump
-prices, deltas, gammas = mc_risk_profile(
-    bs, bar, spots, n_paths=100_000, n_steps=252, seed=1
+# Monte Carlo Greeks: one simulation, reused across every spot and bump.
+# The stencils scale with the spot (mc_greek_bumps); return_errors also
+# reports the Monte Carlo standard errors of the delta and gamma.
+delta_bump, gamma_bump = mc_greek_bumps(bs.S0, bs.sigma, bs.T)
+prices, deltas, gammas, delta_err, gamma_err = mc_risk_profile(
+    bs, bar, spots, bump=delta_bump, gamma_bump=gamma_bump,
+    n_paths=100_000, n_steps=252, seed=1, return_errors=True,
 )
 ```
 
@@ -321,7 +330,9 @@ per spot. For Monte Carlo that would redraw the paths every time, so
 :func:`mc_risk_profile` generates one normal set and reuses the same
 simulated log-returns for every bump -- the common-random-numbers
 requirement for a clean finite difference -- making the profile roughly
-1.5x faster with bit-identical output.
+1.5x faster. Its Greeks use spot-scaled stencils (:func:`mc_greek_bumps`)
+and can return their own Monte Carlo standard errors, because the second
+difference of a discontinuous barrier payoff is inherently noisy.
 
 **Volatility surface** — build it from quotes, convert it to a Dupire
 local-vol surface, turn a term structure into forward vols for the Monte

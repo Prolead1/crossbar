@@ -22,6 +22,7 @@ from crossbar import (
 from crossbar.greeks import (
     greeks_by_variant,
     greeks_by_variant_pde,
+    mc_greek_bumps,
     mc_risk_profile,
     pde_risk_profile,
     risk_profile,
@@ -177,8 +178,11 @@ def test_mc_risk_profile_matches_bump_and_revalue_with_common_paths():
         price_barrier_mc, BS, BAR, SPOTS, bump=0.5, pricer_kwargs=kwargs
     )
     got = mc_risk_profile(BS, BAR, SPOTS, bump=0.5, **kwargs)
+    # The greeks are now formed from the per-path finite differences (so
+    # their standard errors are available), which differs from the generic
+    # profile only in floating-point summation order.
     for a, b in zip(expected, got):
-        np.testing.assert_array_equal(a, b)
+        np.testing.assert_allclose(a, b, rtol=1e-12, atol=0.0)
 
 
 def test_mc_risk_profile_accepts_pre_drawn_normals():
@@ -196,6 +200,64 @@ def test_mc_risk_profile_without_control_variate():
     for arr in (prices, deltas, gammas):
         assert arr.shape == SPOTS.shape
         assert np.all(np.isfinite(arr))
+
+
+def test_mc_risk_profile_returns_greek_standard_errors():
+    out = mc_risk_profile(
+        BS,
+        BAR,
+        SPOTS,
+        bump=0.5,
+        n_paths=2_000,
+        n_steps=20,
+        seed=5,
+        return_errors=True,
+    )
+    prices, deltas, gammas, delta_errors, gamma_errors = out
+    assert delta_errors.shape == SPOTS.shape
+    assert gamma_errors.shape == SPOTS.shape
+    assert np.all(delta_errors > 0.0)
+    assert np.all(gamma_errors > 0.0)
+
+
+def test_mc_greek_bumps_scale_with_natural_spot_scale():
+    S0, sigma, T = 100.0, 0.04, 5.0
+    delta_bump, gamma_bump = mc_greek_bumps(S0, sigma, T)
+    scale = S0 * sigma * np.sqrt(T)
+    assert delta_bump == pytest.approx(0.1 * scale)
+    assert gamma_bump == pytest.approx(0.2 * scale)
+    assert gamma_bump > delta_bump
+
+
+def test_mc_greek_bumps_keep_a_floor_for_tiny_scales():
+    # Very short-dated, low-vol contracts must still get a usable stencil.
+    delta_bump, gamma_bump = mc_greek_bumps(1.0, 1e-6, 1e-6)
+    assert delta_bump == pytest.approx(0.002)
+    assert gamma_bump == pytest.approx(0.01)
+
+
+def test_mc_gamma_is_not_crossing_noise_for_large_spot():
+    # Regression for the reported blow-up: an absolute 0.01 bump made the
+    # second-difference gamma of a spot-100 barrier pure crossing noise
+    # (~ -2.9 instead of ~ -0.0019).
+    bs = BSParams(S0=100.0, r=0.0, q=0.0, sigma=0.04, T=5.0)
+    bar = BarrierSpec("up-and-out", "continuous", 120.0, 100.0, True)
+    delta_bump, gamma_bump = mc_greek_bumps(bs.S0, bs.sigma, bs.T)
+    _, _, gammas, _, gamma_errors = mc_risk_profile(
+        bs,
+        bar,
+        [bs.S0],
+        bump=delta_bump,
+        gamma_bump=gamma_bump,
+        n_paths=50_000,
+        n_steps=252,
+        seed=0,
+        return_errors=True,
+    )
+    reference = price_barrier_closed_form(bs, bar)
+    assert abs(gammas[0] - (-0.001890)) < 0.02
+    assert gamma_errors[0] > 0.0
+    assert reference > 0.0
 
 
 # --------------------------------------------------------------------------

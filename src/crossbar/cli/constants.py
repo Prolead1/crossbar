@@ -12,8 +12,13 @@ BARRIER_CODES = {
 MONITORS = ("continuous", "discrete")
 MONITOR_CODES = {"c": "continuous", "d": "discrete"}
 
-#: Spot bump for the finite-difference deltas of the analytic and Monte
-#: Carlo rows (the PDE row reads its delta off the solved surface).
+#: Spot bump for the finite-difference Greeks of the analytic row (the
+#: closed-form price is smooth, so a small absolute bump is fine; the PDE
+#: row reads its delta/gamma off the solved surface).  The Monte Carlo row
+#: instead scales its stencil with the spot -- see
+#: :func:`crossbar.greeks.mc_greek_bumps` -- because a second difference of
+#: a barrier payoff is dominated by the paths whose crossing moves across
+#: the bump.
 DELTA_BUMP = 0.01
 
 #: PDE mesh used by the CLI (library defaults).  Not exposed as flags so

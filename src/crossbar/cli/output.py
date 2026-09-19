@@ -67,6 +67,24 @@ def _contract_line(c: dict) -> str:
     )
 
 
+def _format_field(value, error=None, missing: str = "-") -> str:
+    """Format one table cell.
+
+    The value is right-aligned to a fixed width so the estimates line up
+    across engines; the standard error, when present, is appended in an
+    extra fixed-width slot to its right.
+    """
+    if value is None:
+        value_cell = f"{missing:>14}"
+    else:
+        value_cell = f"{value:>14.6f}"
+    if error is None:
+        error_cell = " " * 10
+    else:
+        error_cell = f"{f' ±{error:.6f}':<10}"
+    return value_cell + error_cell
+
+
 def _render_results(p: dict) -> None:
     print(f"{'contract':<9} : {_contract_line(p['contract'])}")
     print(f"{'market':<9} : {_market_line(p['market'])}")
@@ -81,13 +99,13 @@ def _render_results(p: dict) -> None:
 
     print()
     print(
-        f"{'engine':<10}{'price':>14}{'delta':>14}{'gamma':>14}{'std_error':>14}"
+        f"{'engine':<10}{'price':>14}{'':<10}"
+        f"{'delta':>14}{'':<10}{'gamma':>14}{'':<10}"
     )
     for row in p["prices"]:
-        price = "n/a" if row["price"] is None else f"{row['price']:.6f}"
-        delta = "-" if row.get("delta") is None else f"{row['delta']:.6f}"
-        gamma = "-" if row.get("gamma") is None else f"{row['gamma']:.6f}"
-        se = "-" if row.get("std_error") is None else f"{row['std_error']:.6f}"
         print(
-            f"{row['engine']:<10}{price:>14}{delta:>14}{gamma:>14}{se:>14}"
+            f"{row['engine']:<10}"
+            f"{_format_field(row.get('price'), row.get('std_error'), missing='n/a')}"
+            f"{_format_field(row.get('delta'), row.get('delta_std_error'))}"
+            f"{_format_field(row.get('gamma'), row.get('gamma_std_error'))}"
         )

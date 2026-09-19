@@ -16,7 +16,7 @@ The package is split into :mod:`~crossbar.greeks.bump`,
 
 from ._common import _extract_price
 from .bump import greeks_by_variant, risk_profile
-from .mc import mc_risk_profile
+from .mc import mc_greek_bumps, mc_risk_profile
 from .pde import greeks_by_variant_pde, pde_risk_profile
 from .surface import (
     _surface_derivatives,
@@ -28,6 +28,7 @@ __all__ = [
     "risk_profile",
     "greeks_by_variant",
     "mc_risk_profile",
+    "mc_greek_bumps",
     "surface_risk_profile",
     "pde_risk_profile",
     "greeks_by_variant_pde",

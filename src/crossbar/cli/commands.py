@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 
 from ..analytic import price_barrier_closed_form, price_vanilla
-from ..greeks import mc_risk_profile, pde_risk_profile, risk_profile
+from ..greeks import mc_greek_bumps, mc_risk_profile, pde_risk_profile, risk_profile
 from ..monte_carlo import gen_normals, price_barrier_mc
 from ..params import BarrierSpec, BSParams, validate_inputs
 from ..vol_surface import stepwise_sigmas_for_strike
@@ -58,9 +58,10 @@ def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
         steps = stepwise_sigmas_for_strike(surface, bs, bar.H, bs.T, a.steps)
 
     # Draw the paths once and share them between the price and the delta
-    # bumps.  ``mc_risk_profile`` reuses a single simulation for all three
-    # bumps, so the expensive path generation runs once instead of four
-    # times.
+    # bumps.  ``mc_risk_profile`` reuses a single simulation for all bumps,
+    # so the expensive path generation runs once instead of many times.
+    # The greek stencils scale with the spot: a fixed absolute bump makes
+    # the second-difference gamma meaningless for large spots.
     Z = gen_normals(a.paths, a.steps, seed=a.seed)
     price, se = price_barrier_mc(
         bs,
@@ -72,15 +73,18 @@ def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
         Z=Z,
         sigma=steps,
     )
-    _, deltas, gammas = mc_risk_profile(
+    delta_bump, gamma_bump = mc_greek_bumps(bs.S0, bs.sigma, bs.T)
+    _, deltas, gammas, delta_errors, gamma_errors = mc_risk_profile(
         bs,
         bar,
         [spot],
-        bump=DELTA_BUMP,
+        bump=delta_bump,
+        gamma_bump=gamma_bump,
         seed=a.seed,
         control_variate=a.control_variate,
         Z=Z,
         sigma=steps,
+        return_errors=True,
     )
     results.append(
         {
@@ -89,6 +93,8 @@ def _run_engines(bs: BSParams, bar: BarrierSpec, a, surface) -> list:
             "delta": float(deltas[0]),
             "gamma": float(gammas[0]),
             "std_error": float(se),
+            "delta_std_error": float(delta_errors[0]),
+            "gamma_std_error": float(gamma_errors[0]),
         }
     )
 
